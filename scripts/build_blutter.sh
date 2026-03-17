@@ -234,6 +234,15 @@ if(NOT TARGET ICU::data)
 endif()
 ICUCMAKE
 
+# ── custom toolchain: chains NDK + adds capstone include_directories ─────────
+# Capstone 4.x installs to include/capstone/. include_directories() in the
+# toolchain file guarantees the path reaches ALL targets even when cmake's
+# cross-compile pkg-config path filtering would strip it from Cflags.
+printf 'include("%s")\ninclude_directories("%s/include/capstone")\n' \
+    "${NDK_TOOLCHAIN_FILE}" "${ANDROID_LIBS}" \
+    > /tmp/android_blutter_toolchain.cmake
+echo "custom toolchain: $(cat /tmp/android_blutter_toolchain.cmake)"
+
 # ── cmake wrapper: injects NDK toolchain + static libs ───────────────────────
 mkdir -p /tmp/cmake_wrapper
 cat > /tmp/cmake_wrapper/cmake << CMAKEWRAP
@@ -249,7 +258,7 @@ for arg in "\$@"; do
     esac
 done
 exec /usr/bin/cmake \\
-    -DCMAKE_TOOLCHAIN_FILE="${NDK_TOOLCHAIN_FILE}" \\
+    -DCMAKE_TOOLCHAIN_FILE="/tmp/android_blutter_toolchain.cmake" \\
     -DANDROID_ABI=arm64-v8a \\
     -DANDROID_PLATFORM=android-31 \\
     -DANDROID_STL=c++_static \\
