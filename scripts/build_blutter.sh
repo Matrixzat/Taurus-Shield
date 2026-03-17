@@ -91,35 +91,24 @@ mkdir -p /tmp/icu_shim/unicode
 # Solution: provide a minimal icu::UnicodeSet shim that wraps the NDK C API (USet*).
 cat > /tmp/icu_shim/unicode/uniset.h << 'UNISET_SHIM'
 // Minimal icu::UnicodeSet shim for Android NDK cross-compilation.
-// Completely self-contained: no NDK ICU headers are included because
-// NDK r27 does not expose unicode/uset.h in its public headers.
-// The ICU C functions are declared directly and resolved at link time
-// from Android's system libicuuc.so.
+// NDK r27 has unicode/uchar.h and unicode/utypes.h (for UChar32/UProperty/UErrorCode)
+// but does NOT have unicode/uset.h. We include the NDK type headers and
+// forward-declare USet + the uset_* C API ourselves. The functions resolve
+// from Android's system libicuuc.so at link time.
 #pragma once
 #ifdef __cplusplus
-#include <stdint.h>
-
-// Guard against redefinition if other ICU headers are present
-#ifndef U_CHAR32_IS_TYPEDEF
-typedef int32_t UChar32;
-#define U_CHAR32_IS_TYPEDEF 1
-#endif
-
-// UProperty and UErrorCode are int32_t-compatible ICU enums
-#ifndef U_PROPERTY_IS_TYPEDEF
-typedef int32_t UProperty;
-#define U_PROPERTY_IS_TYPEDEF 1
-#endif
-#ifndef U_ERROR_CODE_IS_TYPEDEF
-typedef int32_t UErrorCode;
-#define U_ERROR_CODE_IS_TYPEDEF 1
-#endif
+// unicode/uchar.h and unicode/utypes.h ARE in NDK r27 sysroot and define
+// UChar32, UProperty, UErrorCode as their proper enum/typedef types.
+// We include them here so our declarations are consistent even if this
+// shim is included before those headers.
+#include <unicode/uchar.h>
+#include <unicode/utypes.h>
 
 #ifndef USET_CASE_INSENSITIVE
 #define USET_CASE_INSENSITIVE 2
 #endif
 
-// Opaque USet type (ICU internal)
+// Opaque USet type — NDK does NOT expose uset.h, so we forward-declare.
 struct USet;
 
 // ICU C API — resolved from Android system libicuuc.so at link time
