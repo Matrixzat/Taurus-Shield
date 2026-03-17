@@ -390,6 +390,39 @@ echo ""
 echo "[1/3] Building dartvm package for ${DART_VERSION}_android_arm64 ..."
 python3 dartvm_fetch_build.py "${DART_VERSION}" android arm64
 
+# ── auto-detect ALL undefined ICU symbols from downloaded dartvm archives ─────
+# Scan every .a in packages/ so no ICU symbol is ever missed regardless of
+# which Dart VM version or ICU API subset it uses.  Stubs are compiled into
+# the static libicuuc/libicui18n/libicudata archives BEFORE cmake runs, so
+# the linker always resolves them statically (zero DT_NEEDED for ICU).
+echo "Scanning dartvm archives for undefined ICU symbols..."
+DARTVM_ARCHIVES=$(find "${BLUTTER_DIR}/packages" -name "*.a" 2>/dev/null | tr '\n' ' ')
+if [ -n "${DARTVM_ARCHIVES}" ]; then
+    ICU_EXTRA=$(${TOOLCHAIN}/bin/llvm-nm --undefined-only ${DARTVM_ARCHIVES} 2>/dev/null \
+        | awk '{print $NF}' \
+        | grep -E '^(uset_|unorm2?_|ucol_|uidna_|usprep_|ucasemap_|uloc_|udata_|ublock_|urex|uregex|utext_|uscript_|ubidi_|u_[a-zA-Z])' \
+        | sort -u)
+    if [ -n "${ICU_EXTRA}" ]; then
+        echo "Auto-adding ICU stubs for:"
+        echo "${ICU_EXTRA}"
+        printf '#define S(n) __attribute__((visibility("hidden"))) void* n() { return 0; }\n' \
+            > /tmp/icu_extra.c
+        for SYM in ${ICU_EXTRA}; do
+            echo "S(${SYM})" >> /tmp/icu_extra.c
+        done
+        "${CC}" --target=aarch64-linux-android31 --sysroot="${TOOLCHAIN}/sysroot" \
+            -c /tmp/icu_extra.c -o /tmp/icu_extra.o
+        for ICU_LIB in libicuuc libicui18n libicudata; do
+            "${AR}" rcs "${ANDROID_LIBS}/lib/${ICU_LIB}.a" /tmp/icu_stubs.o /tmp/icu_extra.o
+            echo "  updated: ${ANDROID_LIBS}/lib/${ICU_LIB}.a (base + auto-detected)"
+        done
+    else
+        echo "No extra ICU symbols found — base stubs sufficient."
+    fi
+else
+    echo "Warning: no dartvm .a archives found in packages/, using base ICU stubs only"
+fi
+
 echo ""
 echo "[2/3] Building blutter binary (Android ARM64 via NDK)..."
 # Expose our capstone.pc so cmake's FindPkgConfig can find it even in
