@@ -91,12 +91,44 @@ mkdir -p /tmp/icu_shim/unicode
 # Solution: provide a minimal icu::UnicodeSet shim that wraps the NDK C API (USet*).
 cat > /tmp/icu_shim/unicode/uniset.h << 'UNISET_SHIM'
 // Minimal icu::UnicodeSet shim for Android NDK cross-compilation.
-// Wraps the NDK ICU C API (USet*) to provide the C++ interface
-// used by the Dart VM regexp module.
+// Completely self-contained: no NDK ICU headers are included because
+// NDK r27 does not expose unicode/uset.h in its public headers.
+// The ICU C functions are declared directly and resolved at link time
+// from Android's system libicuuc.so.
 #pragma once
 #ifdef __cplusplus
-#include <unicode/uset.h>
-#include <unicode/utypes.h>
+#include <stdint.h>
+
+// Guard against redefinition if other ICU headers are present
+#ifndef U_CHAR32_IS_TYPEDEF
+typedef int32_t UChar32;
+#define U_CHAR32_IS_TYPEDEF 1
+#endif
+
+#ifndef USET_CASE_INSENSITIVE
+#define USET_CASE_INSENSITIVE 2
+#endif
+
+// Opaque USet type (ICU internal)
+struct USet;
+
+// ICU C API — resolved from Android system libicuuc.so at link time
+extern "C" {
+    USet* uset_openEmpty();
+    USet* uset_open(UChar32 start, UChar32 end);
+    void  uset_close(USet* set);
+    void  uset_add(USet* set, UChar32 c);
+    void  uset_addRange(USet* set, UChar32 start, UChar32 end);
+    void  uset_addAll(USet* set, const USet* additionalSet);
+    void  uset_closeOver(USet* set, int32_t attributes);
+    void  uset_removeAllStrings(USet* set);
+    int32_t uset_size(const USet* set);
+    int32_t uset_isEmpty(const USet* set);
+    int32_t uset_contains(const USet* set, UChar32 c);
+    int32_t uset_getRangeCount(const USet* set);
+    UChar32 uset_getRangeStart(const USet* set, int32_t rangeIndex);
+    UChar32 uset_getRangeEnd(const USet* set, int32_t rangeIndex);
+}
 
 namespace icu {
 
