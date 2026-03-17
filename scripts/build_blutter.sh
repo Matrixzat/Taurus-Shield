@@ -221,10 +221,15 @@ ICUCMAKE
 mkdir -p /tmp/cmake_wrapper
 cat > /tmp/cmake_wrapper/cmake << CMAKEWRAP
 #!/bin/bash
-# Pass --install, --build, --open, --workflow directly to cmake (no NDK flags).
+# --install: pass through but force prefix to our Android libs dir so
+# blutter's cmake can find the dartvm package via CMAKE_PREFIX_PATH.
+# --build/--open/etc: pass through unchanged (no NDK configure flags).
 for arg in "\$@"; do
     case "\$arg" in
-        --install|--build|--open|--workflow|--find-package)
+        --install)
+            exec /usr/bin/cmake "\$@" --prefix "${ANDROID_LIBS}"
+            ;;
+        --build|--open|--workflow|--find-package)
             exec /usr/bin/cmake "\$@"
             ;;
     esac
