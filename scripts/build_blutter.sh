@@ -60,20 +60,7 @@ cmake -B /tmp/capstone_build /tmp/capstone_src \
 
 ninja -C /tmp/capstone_build install
 echo "capstone built: $(ls $ANDROID_LIBS/lib/libcapstone.a 2>/dev/null)"
-echo "capstone headers installed to:"
-find "$ANDROID_LIBS/include" -name "capstone.h" 2>/dev/null | head -5 || echo "(none found)"
-# Ensure capstone.h is accessible at include/ root regardless of cmake install layout
-if [ ! -f "${ANDROID_LIBS}/include/capstone.h" ]; then
-    if [ -f "${ANDROID_LIBS}/include/capstone/capstone.h" ]; then
-        ln -sf "${ANDROID_LIBS}/include/capstone/capstone.h" \
-               "${ANDROID_LIBS}/include/capstone.h"
-        echo "created symlink: include/capstone.h -> include/capstone/capstone.h"
-    else
-        echo "WARNING: capstone.h not found anywhere in $ANDROID_LIBS/include"
-    fi
-else
-    echo "capstone.h already at include root: OK"
-fi
+echo "capstone headers: $(find $ANDROID_LIBS/include -name capstone.h 2>/dev/null | head -3)"
 
 # Write capstone.pc (capstone 4.x cmake does not generate one)
 mkdir -p "$ANDROID_LIBS/lib/pkgconfig"
@@ -87,7 +74,7 @@ Name: capstone
 Description: Capstone disassembly engine
 Version: 4.0.2
 Libs: -L${libdir} -lcapstone
-Cflags: -I${includedir} -I${includedir}/capstone
+Cflags: -I${includedir}/capstone
 CAPSTONE_PC
 echo "capstone.pc written to $ANDROID_LIBS/lib/pkgconfig/"
 
@@ -289,6 +276,10 @@ echo "[2/3] Building blutter binary (Android ARM64 via NDK)..."
 # Expose our capstone.pc so cmake's FindPkgConfig can find it even in
 # cross-compilation mode (PKG_CONFIG_PATH is appended to PKG_CONFIG_LIBDIR).
 export PKG_CONFIG_PATH="${ANDROID_LIBS}/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+# Belt-and-suspenders: cmake reads CXXFLAGS to init CMAKE_CXX_FLAGS, ensuring
+# the capstone subdir is always in the include path even if cmake's cross-compile
+# pkg-config path filtering strips it.
+export CXXFLAGS="-I${ANDROID_LIBS}/include/capstone${CXXFLAGS:+ $CXXFLAGS}"
 DUMMY_SO="$(mktemp /tmp/dummy_XXXXXX.so)"
 python3 -c "
 import struct
