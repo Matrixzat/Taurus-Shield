@@ -85,23 +85,32 @@ echo "[prep 3/3] Setting up ICU for Android NDK..."
 NDK_SYSROOT="$TOOLCHAIN/sysroot"
 mkdir -p /tmp/android_cmake_modules
 
+# Symlink host ICU headers into the NDK sysroot so they are found automatically
+# during cross-compilation without any extra cmake flags.
+# ICU headers are architecture-independent — safe to reuse from the host.
+NDK_SYSROOT_INCLUDE="$TOOLCHAIN/sysroot/usr/include"
+if [ ! -e "$NDK_SYSROOT_INCLUDE/unicode" ]; then
+    ln -sf /usr/include/unicode "$NDK_SYSROOT_INCLUDE/unicode"
+    echo "Linked ICU headers into NDK sysroot"
+fi
+
 cat > /tmp/android_cmake_modules/FindICU.cmake << ICUCMAKE
-# Android NDK FindICU override — uses system ICU available on Android 7+
+# Android NDK FindICU override
+# Headers: via NDK sysroot symlink to host libicu-dev headers
+# Runtime: Android system libicuuc.so / libicui18n.so (API 26+)
 set(ICU_FOUND TRUE)
 set(ICU_VERSION "70.1")
-set(ICU_INCLUDE_DIRS "${NDK_SYSROOT}/usr/include")
+set(ICU_INCLUDE_DIRS "${NDK_SYSROOT_INCLUDE}")
 set(ICU_LIBRARIES "-licuuc -licui18n")
 
 if(NOT TARGET ICU::uc)
   add_library(ICU::uc INTERFACE IMPORTED)
   set_target_properties(ICU::uc PROPERTIES
-    INTERFACE_INCLUDE_DIRECTORIES "${NDK_SYSROOT}/usr/include"
     INTERFACE_LINK_LIBRARIES "-licuuc")
 endif()
 if(NOT TARGET ICU::i18n)
   add_library(ICU::i18n INTERFACE IMPORTED)
   set_target_properties(ICU::i18n PROPERTIES
-    INTERFACE_INCLUDE_DIRECTORIES "${NDK_SYSROOT}/usr/include"
     INTERFACE_LINK_LIBRARIES "-licui18n")
 endif()
 if(NOT TARGET ICU::data)
