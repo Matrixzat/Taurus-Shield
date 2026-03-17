@@ -150,12 +150,11 @@ exec "$compiler" -I/tmp/icu_shim "$@"
 LAUNCHER
 chmod +x /tmp/cxx_launcher.sh
 
-cat > /tmp/android_cmake_modules/FindICU.cmake << ICUCMAKE
+cat > /tmp/android_cmake_modules/FindICU.cmake << 'ICUCMAKE'
 # Android NDK FindICU override.
-# ICU_INCLUDE_DIRS points at our icu::UnicodeSet shim so that
-# blutter's: target_include_directories(... PRIVATE "${ICU_INCLUDE_DIRS}")
-# adds -I/tmp/icu_shim to every CXX compilation.
-# This makes #include "unicode/uniset.h" resolve to our shim.
+# ICU_INCLUDE_DIRS="/tmp/icu_shim" causes blutter's cmake to add
+# -I/tmp/icu_shim to every CXX compilation, so that
+# #include "unicode/uniset.h" resolves to our shim.
 set(ICU_FOUND TRUE)
 set(ICU_VERSION "70.1")
 set(ICU_INCLUDE_DIRS "/tmp/icu_shim")
