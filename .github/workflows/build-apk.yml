@@ -13,8 +13,9 @@ on:
 
 jobs:
   build:
-    name: Build blutter_dartvm${{ matrix.dart_version }}_arm64
-    runs-on: ubuntu-24.04-arm   # Native ARM64 runner — FREE for public repos
+    name: Build Dart ${{ matrix.dart_version }}
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
 
     strategy:
       fail-fast: false
@@ -37,46 +38,43 @@ jobs:
             cmake ninja-build build-essential pkg-config \
             libicu-dev libcapstone-dev libfmt-dev \
             python3-pip python3-pyelftools git curl unzip
-          pip3 install requests --quiet
+          pip3 install requests --break-system-packages --quiet 2>/dev/null || pip3 install requests --quiet
 
       - name: Clone blutter
         run: |
           git clone --depth=1 https://github.com/worawit/blutter.git blutter
-          echo "Blutter cloned OK"
+          echo "Blutter cloned"
           ls blutter/
 
       - name: Build for Dart ${{ matrix.dart_version }}
-        id: build
         run: |
+          chmod +x scripts/build_blutter.sh
           bash scripts/build_blutter.sh "${{ matrix.dart_version }}" blutter
-        env:
-          DART_VERSION: ${{ matrix.dart_version }}
 
-      - name: Verify binary
+      - name: Prepare release asset
         run: |
-          BIN="blutter/bin/blutter_dartvm${{ matrix.dart_version }}"
+          BIN="blutter/bin/blutter_dartvm${{ matrix.dart_version }}_android_arm64"
           if [ ! -f "$BIN" ]; then
             echo "ERROR: binary not found at $BIN"
-            ls blutter/bin/ || echo "(bin/ is empty)"
+            ls -la blutter/bin/ 2>/dev/null || echo "(bin/ empty)"
             exit 1
           fi
-          file "$BIN"
-          ls -lh "$BIN"
-          # Rename to include _arm64 suffix for the release
-          cp "$BIN" "blutter_dartvm${{ matrix.dart_version }}_arm64"
-          echo "Binary ready: blutter_dartvm${{ matrix.dart_version }}_arm64"
+          cp "$BIN" "blutter_dartvm${{ matrix.dart_version }}_android_arm64"
+          file "blutter_dartvm${{ matrix.dart_version }}_android_arm64"
+          ls -lh "blutter_dartvm${{ matrix.dart_version }}_android_arm64"
 
-      - name: Upload binary artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: blutter_dartvm${{ matrix.dart_version }}_arm64
-          path: blutter_dartvm${{ matrix.dart_version }}_arm64
+          name: blutter_dartvm${{ matrix.dart_version }}_android_arm64
+          path: blutter_dartvm${{ matrix.dart_version }}_android_arm64
           retention-days: 7
 
   release:
     name: Create GitHub Release
     needs: build
     runs-on: ubuntu-latest
+    if: always() && contains(needs.build.result, 'success')
     permissions:
       contents: write
 
@@ -95,22 +93,7 @@ jobs:
           tag_name: blutter-latest
           name: Blutter ARM64 Binaries
           body: |
-            ## Blutter ARM64 Binaries for Taurus Shield
-
-            These are pre-compiled blutter binaries for Android ARM64 (arm64-v8a).
-            Taurus Shield downloads the matching binary automatically based on the
-            Dart version detected in your target APK.
-
-            ### Included Dart Versions
-            | Binary | Dart Version | Flutter Version |
-            |--------|-------------|-----------------|
-            | blutter_dartvm3.3.4_arm64 | 3.3.4 | Flutter 3.19.x |
-            | blutter_dartvm3.4.4_arm64 | 3.4.4 | Flutter 3.22.x |
-            | blutter_dartvm3.5.4_arm64 | 3.5.4 | Flutter 3.24.x |
-            | blutter_dartvm3.6.2_arm64 | 3.6.2 | Flutter 3.27.x |
-            | blutter_dartvm3.7.2_arm64 | 3.7.2 | Flutter 3.29.x |
-
-            ### Auto-updated by GitHub Actions
-            Built on `ubuntu-24.04-arm` (native ARM64 runner).
+            Pre-compiled blutter binaries for Android ARM64.
+            Taurus Shield downloads the matching binary automatically.
           files: artifacts/**/*
           make_latest: true
