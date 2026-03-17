@@ -396,19 +396,28 @@ python3 dartvm_fetch_build.py "${DART_VERSION}" android arm64
 # the static libicuuc/libicui18n/libicudata archives BEFORE cmake runs, so
 # the linker always resolves them statically (zero DT_NEEDED for ICU).
 echo "Scanning dartvm archives for undefined ICU symbols..."
-DARTVM_ARCHIVES=$(find "${BLUTTER_DIR}/packages" -name "*.a" 2>/dev/null | tr '\n' ' ')
-if [ -n "${DARTVM_ARCHIVES}" ]; then
-    ICU_EXTRA=$(${TOOLCHAIN}/bin/llvm-nm --undefined-only ${DARTVM_ARCHIVES} 2>/dev/null \
+# Build an array of .a paths (handles spaces, empty sets)
+DARTVM_ARCHIVES_LIST=()
+while IFS= read -r _f; do
+    [ -f "$_f" ] && DARTVM_ARCHIVES_LIST+=("$_f")
+done < <(find "${BLUTTER_DIR}/packages" -name "*.a" 2>/dev/null)
+
+if [ ${#DARTVM_ARCHIVES_LIST[@]} -gt 0 ]; then
+    echo "  found ${#DARTVM_ARCHIVES_LIST[@]} archive(s): ${DARTVM_ARCHIVES_LIST[*]}"
+    # grep exits 1 on no match — use || true so set -e doesn't kill us
+    ICU_EXTRA=$(
+        "${TOOLCHAIN}/bin/llvm-nm" --undefined-only "${DARTVM_ARCHIVES_LIST[@]}" 2>/dev/null \
         | awk '{print $NF}' \
         | grep -E '^(uset_|unorm2?_|ucol_|uidna_|usprep_|ucasemap_|uloc_|udata_|ublock_|urex|uregex|utext_|uscript_|ubidi_|u_[a-zA-Z])' \
-        | sort -u)
+        | sort -u || true
+    )
     if [ -n "${ICU_EXTRA}" ]; then
         echo "Auto-adding ICU stubs for:"
         echo "${ICU_EXTRA}"
         printf '#define S(n) __attribute__((visibility("hidden"))) void* n() { return 0; }\n' \
             > /tmp/icu_extra.c
         for SYM in ${ICU_EXTRA}; do
-            echo "S(${SYM})" >> /tmp/icu_extra.c
+            printf 'S(%s)\n' "${SYM}" >> /tmp/icu_extra.c
         done
         "${CC}" --target=aarch64-linux-android31 --sysroot="${TOOLCHAIN}/sysroot" \
             -c /tmp/icu_extra.c -o /tmp/icu_extra.o
