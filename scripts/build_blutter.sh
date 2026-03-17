@@ -221,15 +221,12 @@ ICUCMAKE
 mkdir -p /tmp/cmake_wrapper
 cat > /tmp/cmake_wrapper/cmake << CMAKEWRAP
 #!/bin/bash
-# --install: pass through but force prefix to our Android libs dir so
-# blutter's cmake can find the dartvm package via CMAKE_PREFIX_PATH.
+# --install: pass through unchanged so dartvm installs to its configured
+# CMAKE_INSTALL_PREFIX (blutter/packages/), where blutter.py expects it.
 # --build/--open/etc: pass through unchanged (no NDK configure flags).
 for arg in "\$@"; do
     case "\$arg" in
-        --install)
-            exec /usr/bin/cmake "\$@" --prefix "${ANDROID_LIBS}"
-            ;;
-        --build|--open|--workflow|--find-package)
+        --install|--build|--open|--workflow|--find-package)
             exec /usr/bin/cmake "\$@"
             ;;
     esac
@@ -239,7 +236,7 @@ exec /usr/bin/cmake \\
     -DANDROID_ABI=arm64-v8a \\
     -DANDROID_PLATFORM=android-31 \\
     -DANDROID_STL=c++_static \\
-    -DCMAKE_PREFIX_PATH="${ANDROID_LIBS}" \\
+    -DCMAKE_PREFIX_PATH="${ANDROID_LIBS};${BLUTTER_DIR}/packages" \\
     -DCMAKE_MODULE_PATH="/tmp/android_cmake_modules" \\
     -DCMAKE_EXE_LINKER_FLAGS="-rdynamic" \\
     "\$@"
