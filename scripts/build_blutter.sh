@@ -237,6 +237,8 @@ exec /usr/bin/cmake \\
     -DANDROID_PLATFORM=android-31 \\
     -DANDROID_STL=c++_static \\
     -DCMAKE_PREFIX_PATH="${ANDROID_LIBS};${BLUTTER_DIR}/packages" \\
+    -DCMAKE_FIND_ROOT_PATH="${BLUTTER_DIR}/packages;${ANDROID_LIBS}" \\
+    -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \\
     -DCMAKE_MODULE_PATH="/tmp/android_cmake_modules" \\
     -DCMAKE_EXE_LINKER_FLAGS="-rdynamic" \\
     "\$@"
