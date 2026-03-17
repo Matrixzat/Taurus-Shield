@@ -176,7 +176,7 @@ if(NOT TARGET ICU::data)
 endif()
 ICUCMAKE
 
-# ── cmake wrapper: injects NDK toolchain + static libs + compiler launcher ────
+# ── cmake wrapper: injects NDK toolchain + static libs ───────────────────────
 mkdir -p /tmp/cmake_wrapper
 cat > /tmp/cmake_wrapper/cmake << CMAKEWRAP
 #!/bin/bash
@@ -185,7 +185,6 @@ exec /usr/bin/cmake \\
     -DANDROID_ABI=arm64-v8a \\
     -DANDROID_PLATFORM=android-31 \\
     -DANDROID_STL=c++_static \\
-    -DCMAKE_CXX_COMPILER_LAUNCHER=/tmp/cxx_launcher.sh \\
     -DCMAKE_PREFIX_PATH="${ANDROID_LIBS}" \\
     -DCMAKE_MODULE_PATH="/tmp/android_cmake_modules" \\
     -DCMAKE_EXE_LINKER_FLAGS="-rdynamic" \\
@@ -196,6 +195,28 @@ export PATH="/tmp/cmake_wrapper:$PATH"
 
 # ── blutter build ─────────────────────────────────────────────────────────────
 cd "${BLUTTER_DIR}"
+
+# Pre-clone the Dart SDK so we can patch the ICU C++ usages before building.
+# dartvm_fetch_build.py skips cloning when the directory already exists.
+DART_SDK_DIR="${BLUTTER_DIR}/dartsdk/v${DART_VERSION}"
+if [ ! -d "$DART_SDK_DIR" ]; then
+    echo "Pre-cloning Dart SDK ${DART_VERSION} for source patching..."
+    git clone --depth=1 --branch "${DART_VERSION}" \
+        https://github.com/dart-lang/sdk.git "$DART_SDK_DIR"
+fi
+
+# Patch: replace #include "unicode/uniset.h" with our shim's absolute path.
+# The shim defines icu::UnicodeSet using the NDK's ICU C API (USet*).
+# Using an absolute path bypasses all include-search-path ordering issues.
+echo "Patching Dart VM regexp sources (uniset.h → absolute shim path)..."
+for f in \
+    "${DART_SDK_DIR}/runtime/vm/regexp/regexp.cc" \
+    "${DART_SDK_DIR}/runtime/vm/regexp/regexp_parser.cc"; do
+    if [ -f "$f" ]; then
+        sed -i 's|#include "unicode/uniset.h"|#include "/tmp/icu_shim/unicode/uniset.h"|g' "$f"
+        echo "  patched: $(basename $f)"
+    fi
+done
 
 echo ""
 echo "[1/3] Building dartvm package for ${DART_VERSION}_android_arm64 ..."
