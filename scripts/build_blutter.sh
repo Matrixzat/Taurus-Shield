@@ -268,6 +268,7 @@ S(uset_span) S(uset_spanBack) S(uset_spanUTF8) S(uset_spanBackUTF8)
 S(uset_equals) S(uset_serialize) S(uset_getSerializedSet) S(uset_setSerializedToOne)
 S(uset_serializedContains) S(uset_getSerializedRangeCount) S(uset_getSerializedRange)
 S(uset_getString) S(uset_getStringCount)
+S(uset_getRangeCount) S(uset_getRangeStart) S(uset_getRangeEnd)
 /* unorm2.h */
 S(unorm2_getInstance) S(unorm2_openFiltered) S(unorm2_close)
 S(unorm2_normalize) S(unorm2_normalizeSecondAndAppend) S(unorm2_append)
@@ -396,14 +397,23 @@ python3 dartvm_fetch_build.py "${DART_VERSION}" android arm64
 # the static libicuuc/libicui18n/libicudata archives BEFORE cmake runs, so
 # the linker always resolves them statically (zero DT_NEEDED for ICU).
 echo "Scanning dartvm archives for undefined ICU symbols..."
-# Build an array of .a paths (handles spaces, empty sets)
+# Debug: show what's in packages/ and dartsdk/ so we know where .a lives
+echo "  packages/ contents (lib/):"
+ls -lh "${BLUTTER_DIR}/packages/lib/" 2>/dev/null | head -10 || echo "    (packages/lib/ not found)"
+echo "  dartsdk/ contents:"
+ls "${BLUTTER_DIR}/dartsdk/" 2>/dev/null | head -5 || echo "    (dartsdk/ not found)"
+
+# Search packages/, dartsdk/ and any build output dirs for dartvm .a archives
 DARTVM_ARCHIVES_LIST=()
 while IFS= read -r _f; do
     [ -f "$_f" ] && DARTVM_ARCHIVES_LIST+=("$_f")
-done < <(find "${BLUTTER_DIR}/packages" -name "*.a" 2>/dev/null)
+done < <(find "${BLUTTER_DIR}" \( -name "*.a" -o -name "libdart*.a" \) \
+    -not -path "*/capstone/*" -not -path "*/android_arm64_libs/*" 2>/dev/null)
+
+echo "  found ${#DARTVM_ARCHIVES_LIST[@]} dartvm archive(s)"
+[ ${#DARTVM_ARCHIVES_LIST[@]} -gt 0 ] && echo "    ${DARTVM_ARCHIVES_LIST[*]}"
 
 if [ ${#DARTVM_ARCHIVES_LIST[@]} -gt 0 ]; then
-    echo "  found ${#DARTVM_ARCHIVES_LIST[@]} archive(s): ${DARTVM_ARCHIVES_LIST[*]}"
     # grep exits 1 on no match — use || true so set -e doesn't kill us
     ICU_EXTRA=$(
         "${TOOLCHAIN}/bin/llvm-nm" --undefined-only "${DARTVM_ARCHIVES_LIST[@]}" 2>/dev/null \
