@@ -194,11 +194,13 @@ chmod +x /tmp/cmake_wrapper/cmake
 export PATH="/tmp/cmake_wrapper:$PATH"
 
 # ── blutter build ─────────────────────────────────────────────────────────────
+# Resolve DART_SDK_DIR as an absolute path BEFORE cd-ing into BLUTTER_DIR.
+# After cd, "${BLUTTER_DIR}/..." would double-nest the directory.
+DART_SDK_DIR="$(cd "${BLUTTER_DIR}" && pwd)/dartsdk/v${DART_VERSION}"
 cd "${BLUTTER_DIR}"
 
 # Pre-clone the Dart SDK so we can patch the ICU C++ usages before building.
 # dartvm_fetch_build.py skips cloning when the directory already exists.
-DART_SDK_DIR="${BLUTTER_DIR}/dartsdk/v${DART_VERSION}"
 if [ ! -d "$DART_SDK_DIR" ]; then
     echo "Pre-cloning Dart SDK ${DART_VERSION} for source patching..."
     git clone --depth=1 --branch "${DART_VERSION}" \
