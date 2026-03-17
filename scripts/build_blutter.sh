@@ -22,8 +22,8 @@ fi
 echo "NDK: $NDK_HOME"
 
 TOOLCHAIN="$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64"
-CC="$TOOLCHAIN/bin/aarch64-linux-android26-clang"
-CXX="$TOOLCHAIN/bin/aarch64-linux-android26-clang++"
+CC="$TOOLCHAIN/bin/aarch64-linux-android31-clang"
+CXX="$TOOLCHAIN/bin/aarch64-linux-android31-clang++"
 AR="$TOOLCHAIN/bin/llvm-ar"
 RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
 STRIP_BIN="$TOOLCHAIN/bin/llvm-strip"
@@ -32,7 +32,7 @@ NDK_TOOLCHAIN_FILE="$NDK_HOME/build/cmake/android.toolchain.cmake"
 ANDROID_COMMON_CMAKE=(
     -DCMAKE_TOOLCHAIN_FILE="$NDK_TOOLCHAIN_FILE"
     -DANDROID_ABI=arm64-v8a
-    -DANDROID_PLATFORM=android-26
+    -DANDROID_PLATFORM=android-31
     -DANDROID_STL=c++_static
     -DCMAKE_BUILD_TYPE=Release
     -GNinja
@@ -85,14 +85,21 @@ echo "[prep 3/3] Setting up ICU for Android NDK..."
 NDK_SYSROOT="$TOOLCHAIN/sysroot"
 mkdir -p /tmp/android_cmake_modules
 
-# Symlink host ICU headers into the NDK sysroot so they are found automatically
-# during cross-compilation without any extra cmake flags.
+# Copy missing ICU C++ headers (e.g. uniset.h) from host libicu-dev into the
+# NDK sysroot. The NDK ships only a subset of ICU C headers; the Dart VM regexp
+# module needs full C++ headers (uniset.h etc.).
 # ICU headers are architecture-independent — safe to reuse from the host.
 NDK_SYSROOT_INCLUDE="$TOOLCHAIN/sysroot/usr/include"
-if [ ! -e "$NDK_SYSROOT_INCLUDE/unicode" ]; then
-    ln -sf /usr/include/unicode "$NDK_SYSROOT_INCLUDE/unicode"
-    echo "Linked ICU headers into NDK sysroot"
-fi
+mkdir -p "$NDK_SYSROOT_INCLUDE/unicode"
+echo "Copying missing ICU headers from host into NDK sysroot..."
+for hdr in /usr/include/unicode/*.h; do
+    fname="$(basename "$hdr")"
+    dest="$NDK_SYSROOT_INCLUDE/unicode/$fname"
+    if [ ! -f "$dest" ]; then
+        cp "$hdr" "$dest"
+        echo "  copied: $fname"
+    fi
+done
 
 cat > /tmp/android_cmake_modules/FindICU.cmake << ICUCMAKE
 # Android NDK FindICU override
@@ -127,7 +134,7 @@ cat > /tmp/cmake_wrapper/cmake << CMAKEWRAP
 exec /usr/bin/cmake \\
     -DCMAKE_TOOLCHAIN_FILE="${NDK_TOOLCHAIN_FILE}" \\
     -DANDROID_ABI=arm64-v8a \\
-    -DANDROID_PLATFORM=android-26 \\
+    -DANDROID_PLATFORM=android-31 \\
     -DANDROID_STL=c++_static \\
     -DCMAKE_PREFIX_PATH="${ANDROID_LIBS}" \\
     -DCMAKE_MODULE_PATH="/tmp/android_cmake_modules" \\
