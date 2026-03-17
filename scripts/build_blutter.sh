@@ -325,6 +325,9 @@ S(ucasemap_open) S(ucasemap_close) S(ucasemap_getLocale) S(ucasemap_getOptions)
 S(ucasemap_setLocale) S(ucasemap_setOptions) S(ucasemap_getNFKCCasefold)
 S(ucasemap_setNFKCCasefold) S(ucasemap_utf8ToLower) S(ucasemap_utf8ToUpper)
 S(ucasemap_utf8ToTitle) S(ucasemap_utf8FoldCase)
+/* uprops.h — property name/enum lookup used by regexp character class parsing */
+S(u_getPropertyEnum) S(u_getPropertyName)
+S(u_getPropertyValueEnum) S(u_getPropertyValueName) S(u_getPropertyValueEnumNoSpaces)
 ICU_STUBS_EOF
 
 "${CC}" --target=aarch64-linux-android31 --sysroot="${TOOLCHAIN}/sysroot" \
@@ -469,6 +472,49 @@ with open('${DUMMY_SO}', 'wb') as f:
 python3 blutter.py --dart-version "${DART_VERSION}_android_arm64" \
     --rebuild "${DUMMY_SO}" /tmp/blutter_out 2>&1 || true
 rm -f "${DUMMY_SO}"
+
+# ── PASS 2: scan built binary for any remaining undefined ICU symbols ──────────
+# With --unresolved-symbols=ignore-all, missing stubs become UNDEF entries in
+# .dynsym, causing "cannot locate symbol" at dlopen time.  Detect them all
+# here, generate stubs, and re-link so the final binary has zero UNDEF ICU.
+BINARY_P2="${BLUTTER_DIR}/bin/blutter_dartvm${DART_VERSION}_android_arm64"
+BUILD_DIR_P2="${BLUTTER_DIR}/build/blutter_dartvm${DART_VERSION}_android_arm64"
+if [ -f "${BINARY_P2}" ] && [ -d "${BUILD_DIR_P2}" ]; then
+    echo "PASS 2: scanning ${BINARY_P2} for undefined ICU symbols..."
+    # llvm-readelf prints UNDEF entries; sed strips @VERSION suffixes
+    ICU_UNDEF_P2=$(
+        "${TOOLCHAIN}/bin/llvm-readelf" --dyn-syms "${BINARY_P2}" 2>/dev/null \
+        | awk '/UNDEF/ && !/LOCAL/ {print $NF}' \
+        | sed 's/@.*//' \
+        | grep -E '^(uset_|unorm2?_|u_[a-zA-Z]|ucasemap_|uloc_|udata_|ublock_|ubidi_|uscript_|utext_|uidna_|ucol_|usprep_)' \
+        | sort -u || true
+    )
+    if [ -n "${ICU_UNDEF_P2}" ]; then
+        echo "  PASS 2 found undefined ICU symbols — adding stubs and re-linking:"
+        echo "${ICU_UNDEF_P2}"
+        printf '#define S(n) __attribute__((visibility("hidden"))) void* n() { return 0; }\n' \
+            > /tmp/icu_pass2.c
+        for SYM in ${ICU_UNDEF_P2}; do
+            printf 'S(%s)\n' "${SYM}" >> /tmp/icu_pass2.c
+        done
+        "${CC}" --target=aarch64-linux-android31 --sysroot="${TOOLCHAIN}/sysroot" \
+            -c /tmp/icu_pass2.c -o /tmp/icu_pass2.o
+        for ICU_LIB in libicuuc libicui18n libicudata; do
+            "${AR}" rcs "${ANDROID_LIBS}/lib/${ICU_LIB}.a" \
+                /tmp/icu_stubs.o /tmp/icu_pass2.o
+        done
+        # Touch the archive so cmake detects it is newer than the binary
+        touch "${ANDROID_LIBS}/lib/libicuuc.a"
+        # Re-link (cmake detects newer .a → re-runs link step)
+        /usr/bin/cmake --build "${BUILD_DIR_P2}" -- -j$(nproc) 2>&1
+        /usr/bin/cmake --install "${BUILD_DIR_P2}" 2>&1
+        echo "  PASS 2 re-link complete."
+    else
+        echo "  PASS 2: no undefined ICU symbols — binary is clean."
+    fi
+else
+    echo "  PASS 2: binary or build dir not found, skipping."
+fi
 
 echo ""
 echo "[3/3] Checking output ..."
