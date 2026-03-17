@@ -18,6 +18,21 @@ python3 dartvm_fetch_build.py "${DART_VERSION}" android arm64
 echo ""
 echo "[2/3] Building blutter binary ..."
 
+# Export main + all global symbols so dlopen/dlsym can find them
+# (Android app loads via dlopen from code_cache, not execve)
+export LDFLAGS="-rdynamic"
+export CMAKE_EXE_LINKER_FLAGS_INIT="-rdynamic"
+
+# Patch any CMakeLists.txt that defines the blutter target
+for f in CMakeLists.txt blutter/CMakeLists.txt; do
+    if [ -f "$f" ]; then
+        if ! grep -q "rdynamic" "$f"; then
+            printf '\n# Export symbols for dlopen/dlsym\nadd_link_options(-rdynamic)\n' >> "$f"
+            echo "Patched $f with -rdynamic"
+        fi
+    fi
+done
+
 DUMMY_SO="$(mktemp /tmp/dummy_XXXXXX.so)"
 python3 -c "
 import struct
@@ -46,9 +61,13 @@ if [ -f "${BIN_PATH}" ]; then
     echo "SUCCESS: ${BIN_PATH}"
     file "${BIN_PATH}"
     ls -lh "${BIN_PATH}"
-    strip --strip-unneeded "${BIN_PATH}" 2>/dev/null || true
-    echo "Stripped size:"
+    # Use --strip-debug only: preserves the dynamic symbol table needed for dlsym
+    strip --strip-debug "${BIN_PATH}" 2>/dev/null || true
+    echo "Stripped (debug only) size:"
     ls -lh "${BIN_PATH}"
+    # Verify main is in dynamic symbol table
+    echo "Checking dynamic symbols:"
+    nm -D "${BIN_PATH}" 2>/dev/null | grep " main" || echo "(main symbol check skipped)"
 else
     echo "ERROR: Binary not found at ${BIN_PATH}"
     echo "Contents of bin/:"
