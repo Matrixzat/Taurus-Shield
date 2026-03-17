@@ -151,18 +151,21 @@ LAUNCHER
 chmod +x /tmp/cxx_launcher.sh
 
 cat > /tmp/android_cmake_modules/FindICU.cmake << ICUCMAKE
-# Android NDK FindICU override
-# Headers: NDK C API headers + our uniset.h shim (injected via compiler launcher)
-# Runtime: Android system libicuuc.so / libicui18n.so (API 31+)
+# Android NDK FindICU override.
+# ICU_INCLUDE_DIRS points at our icu::UnicodeSet shim so that
+# blutter's: target_include_directories(... PRIVATE "${ICU_INCLUDE_DIRS}")
+# adds -I/tmp/icu_shim to every CXX compilation.
+# This makes #include "unicode/uniset.h" resolve to our shim.
 set(ICU_FOUND TRUE)
 set(ICU_VERSION "70.1")
-set(ICU_INCLUDE_DIRS "")
+set(ICU_INCLUDE_DIRS "/tmp/icu_shim")
 set(ICU_LIBRARIES "-licuuc -licui18n")
 
 if(NOT TARGET ICU::uc)
   add_library(ICU::uc INTERFACE IMPORTED)
   set_target_properties(ICU::uc PROPERTIES
-    INTERFACE_LINK_LIBRARIES "-licuuc")
+    INTERFACE_LINK_LIBRARIES "-licuuc"
+    INTERFACE_INCLUDE_DIRECTORIES "/tmp/icu_shim")
 endif()
 if(NOT TARGET ICU::i18n)
   add_library(ICU::i18n INTERFACE IMPORTED)
@@ -194,31 +197,7 @@ chmod +x /tmp/cmake_wrapper/cmake
 export PATH="/tmp/cmake_wrapper:$PATH"
 
 # ── blutter build ─────────────────────────────────────────────────────────────
-# Resolve DART_SDK_DIR as an absolute path BEFORE cd-ing into BLUTTER_DIR.
-# After cd, "${BLUTTER_DIR}/..." would double-nest the directory.
-DART_SDK_DIR="$(cd "${BLUTTER_DIR}" && pwd)/dartsdk/v${DART_VERSION}"
 cd "${BLUTTER_DIR}"
-
-# Pre-clone the Dart SDK so we can patch the ICU C++ usages before building.
-# dartvm_fetch_build.py skips cloning when the directory already exists.
-if [ ! -d "$DART_SDK_DIR" ]; then
-    echo "Pre-cloning Dart SDK ${DART_VERSION} for source patching..."
-    git clone --depth=1 --branch "${DART_VERSION}" \
-        https://github.com/dart-lang/sdk.git "$DART_SDK_DIR"
-fi
-
-# Patch: replace #include "unicode/uniset.h" with our shim's absolute path.
-# The shim defines icu::UnicodeSet using the NDK's ICU C API (USet*).
-# Using an absolute path bypasses all include-search-path ordering issues.
-echo "Patching Dart VM regexp sources (uniset.h → absolute shim path)..."
-for f in \
-    "${DART_SDK_DIR}/runtime/vm/regexp/regexp.cc" \
-    "${DART_SDK_DIR}/runtime/vm/regexp/regexp_parser.cc"; do
-    if [ -f "$f" ]; then
-        sed -i 's|#include "unicode/uniset.h"|#include "/tmp/icu_shim/unicode/uniset.h"|g' "$f"
-        echo "  patched: $(basename $f)"
-    fi
-done
 
 echo ""
 echo "[1/3] Building dartvm package for ${DART_VERSION}_android_arm64 ..."
