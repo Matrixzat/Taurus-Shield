@@ -6,7 +6,7 @@ on:
       dart_versions:
         description: 'Comma-separated Dart versions (e.g. 3.4.4,3.5.4,3.6.2)'
         required: false
-        default: '3.3.4,3.4.4,3.5.4,3.6.2,3.7.2'
+        default: '3.3.4,3.4.4,3.5.4,3.6.2,3.7.2,3.11.1'
   push:
     tags:
       - 'blutter-*'
@@ -26,6 +26,7 @@ jobs:
           - '3.5.4'
           - '3.6.2'
           - '3.7.2'
+          - '3.11.1'
 
     steps:
       - name: Checkout
