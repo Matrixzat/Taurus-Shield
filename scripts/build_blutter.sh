@@ -243,13 +243,94 @@ ICUCMAKE
 SYSROOT_LIBDIR="${TOOLCHAIN}/sysroot/usr/lib/aarch64-linux-android"
 echo "NDK ICU stubs: $(ls ${SYSROOT_LIBDIR}/libicu*.* 2>/dev/null || echo 'none')"
 echo "NDK pthread:   $(ls ${SYSROOT_LIBDIR}/libpthread.* 2>/dev/null || echo 'none')"
-printf 'void __android_sys_stub(void) {}\n' > /tmp/android_sys_stub.c
-for SYSLIB in libicuuc libicui18n libicudata; do
-    "${CC}" --target=aarch64-linux-android31 \
-        --sysroot="${TOOLCHAIN}/sysroot" \
-        -fPIC -shared -nostdlib \
-        -o "${ANDROID_LIBS}/lib/${SYSLIB}.so" /tmp/android_sys_stub.c
-    echo "stub created: ${ANDROID_LIBS}/lib/${SYSLIB}.so"
+# ICU: link STATICALLY with no-op stubs so the binary has zero DT_NEEDED
+# for libicuuc/libicui18n/libicudata.  The Android APEX namespace isolation
+# (clns-4 vs apex/com.android.i18n) prevents dlopen from resolving DT_NEEDED
+# ICU at runtime.  Static stubs return 0 for every ICU call; blutter's
+# analysis path does not execute Dart code so the regexp/unicode engine is
+# never actually invoked.
+cat > /tmp/icu_stubs.c << 'ICU_STUBS_EOF'
+#define S(n) __attribute__((visibility("hidden"))) void* n() { return 0; }
+/* uset.h */
+S(uset_openEmpty) S(uset_open) S(uset_openPattern) S(uset_openPatternOptions)
+S(uset_close) S(uset_clone) S(uset_isFrozen) S(uset_freeze) S(uset_cloneAsThawed)
+S(uset_set) S(uset_applyPattern) S(uset_applyIntPropertyValue) S(uset_applyPropertyAlias)
+S(uset_resemblesPattern) S(uset_toPattern)
+S(uset_add) S(uset_addAll) S(uset_addRange) S(uset_addString) S(uset_addAllCodePoints)
+S(uset_remove) S(uset_removeRange) S(uset_removeString) S(uset_removeAll)
+S(uset_retain) S(uset_retainAll) S(uset_retainString) S(uset_compact)
+S(uset_complement) S(uset_complementAll) S(uset_complementRange) S(uset_complementString)
+S(uset_clear) S(uset_closeOver) S(uset_removeAllStrings)
+S(uset_isEmpty) S(uset_contains) S(uset_containsRange) S(uset_containsString)
+S(uset_indexOf) S(uset_charAt) S(uset_size) S(uset_getItemCount) S(uset_getItem)
+S(uset_containsAll) S(uset_containsAllCodePoints) S(uset_containsNone) S(uset_containsSome)
+S(uset_span) S(uset_spanBack) S(uset_spanUTF8) S(uset_spanBackUTF8)
+S(uset_equals) S(uset_serialize) S(uset_getSerializedSet) S(uset_setSerializedToOne)
+S(uset_serializedContains) S(uset_getSerializedRangeCount) S(uset_getSerializedRange)
+S(uset_getString) S(uset_getStringCount)
+/* unorm2.h */
+S(unorm2_getInstance) S(unorm2_openFiltered) S(unorm2_close)
+S(unorm2_normalize) S(unorm2_normalizeSecondAndAppend) S(unorm2_append)
+S(unorm2_isNormalized) S(unorm2_quickCheck) S(unorm2_spanQuickCheckYes)
+S(unorm2_hasBoundaryBefore) S(unorm2_hasBoundaryAfter) S(unorm2_isInert)
+S(unorm2_getNFCInstance) S(unorm2_getNFDInstance) S(unorm2_getNFKCInstance)
+S(unorm2_getNFKDInstance) S(unorm2_getNFKCCasefoldInstance)
+S(unorm2_getDecomposition) S(unorm2_getRawDecomposition)
+S(unorm2_composePair) S(unorm2_getCombiningClass)
+/* u_* general + uchar.h */
+S(u_getDataDirectory) S(u_setDataDirectory) S(u_errorName) S(u_init) S(u_cleanup)
+S(u_versionToString) S(u_getVersion)
+S(u_charType) S(u_getCombiningClass) S(u_charDigitValue) S(ublock_getCode)
+S(u_charName) S(u_charFromName) S(u_enumCharNames) S(u_charNameAlias) S(u_enumCharTypes)
+S(u_getIntPropertyValue) S(u_getIntPropertyMinValue) S(u_getIntPropertyMaxValue)
+S(u_getNumericValue) S(u_isUAlphabetic) S(u_isULowercase) S(u_isUUppercase) S(u_isUWhiteSpace)
+S(u_hasBinaryProperty) S(u_getBinaryPropertySet)
+S(u_isalpha) S(u_isalnum) S(u_isdigit) S(u_isxdigit) S(u_ispunct) S(u_isgraph)
+S(u_isblank) S(u_isdefined) S(u_isspace) S(u_isJavaSpaceChar) S(u_isWhitespace)
+S(u_iscntrl) S(u_isISOControl) S(u_isprint) S(u_isbase)
+S(u_charDirection) S(u_isMirrored) S(u_charMirror) S(u_getBidiPairedBracket)
+S(u_toupper) S(u_tolower) S(u_totitle) S(u_foldCase)
+S(u_digit) S(u_forDigit) S(u_charAge) S(u_getUnicodeVersion) S(u_getFC_NFKC_Closure)
+/* ustring.h */
+S(u_strlen) S(u_strcat) S(u_strncat) S(u_strcmp) S(u_strcasecmp)
+S(u_strncmp) S(u_strncasecmp) S(u_strncmpCodePointOrder)
+S(u_strcpy) S(u_strncpy) S(u_uastrcpy) S(u_uastrncpy) S(u_austrcpy) S(u_austrncpy)
+S(u_strToUTF8) S(u_strFromUTF8) S(u_strToUTF8WithSub) S(u_strFromUTF8WithSub) S(u_strFromUTF8Lenient)
+S(u_strToUTF32) S(u_strFromUTF32) S(u_strToUTF32WithSub) S(u_strFromUTF32WithSub)
+S(u_countChar32) S(u_strHasMoreChar32Than)
+S(u_memcpy) S(u_memmove) S(u_memset) S(u_memcmp) S(u_memcmpCodePointOrder)
+S(u_memchr) S(u_memchr32) S(u_memrchr) S(u_memrchr32) S(u_unescape) S(u_unescapeAt)
+S(u_strToLower) S(u_strToUpper) S(u_strToTitle) S(u_strFoldCase)
+S(u_strCompare) S(u_strCompareIter) S(u_strCaseCompare)
+S(u_strchr) S(u_strchr32) S(u_strrstr) S(u_strstr) S(u_strFindFirst) S(u_strFindLast)
+S(u_strcspn) S(u_strspn) S(u_strpbrk) S(u_strrchr) S(u_strrchr32) S(u_strtok_r)
+/* uloc.h */
+S(uloc_getDefault) S(uloc_setDefault) S(uloc_getLanguage) S(uloc_getScript)
+S(uloc_getCountry) S(uloc_getVariant) S(uloc_getName) S(uloc_canonicalize)
+S(uloc_getISO3Language) S(uloc_getISO3Country) S(uloc_getLCID)
+S(uloc_getDisplayName) S(uloc_getDisplayLanguage) S(uloc_getDisplayScript)
+S(uloc_getDisplayCountry) S(uloc_getDisplayVariant) S(uloc_getDisplayKeyword)
+S(uloc_getDisplayKeywordValue) S(uloc_getAvailable) S(uloc_countAvailable)
+/* udata.h */
+S(udata_open) S(udata_openChoice) S(udata_close) S(udata_getMemory) S(udata_getInfo)
+S(udata_setCommonData) S(udata_setAppData) S(udata_setFileAccess)
+/* misc */
+S(usprep_open) S(usprep_openByType) S(usprep_close) S(usprep_prepare)
+S(uidna_openUTS46) S(uidna_close) S(uidna_nameToASCII) S(uidna_nameToUnicode)
+S(uidna_labelToASCII) S(uidna_labelToUnicode)
+S(uidna_nameToASCII_UTF8) S(uidna_nameToUnicodeUTF8)
+S(uidna_labelToASCII_UTF8) S(uidna_labelToUnicodeUTF8)
+S(ucasemap_open) S(ucasemap_close) S(ucasemap_getLocale) S(ucasemap_getOptions)
+S(ucasemap_setLocale) S(ucasemap_setOptions) S(ucasemap_getNFKCCasefold)
+S(ucasemap_setNFKCCasefold) S(ucasemap_utf8ToLower) S(ucasemap_utf8ToUpper)
+S(ucasemap_utf8ToTitle) S(ucasemap_utf8FoldCase)
+ICU_STUBS_EOF
+
+"${CC}" --target=aarch64-linux-android31 --sysroot="${TOOLCHAIN}/sysroot" \
+    -c /tmp/icu_stubs.c -o /tmp/icu_stubs.o
+for ICU_LIB in libicuuc libicui18n libicudata; do
+    "${AR}" rcs "${ANDROID_LIBS}/lib/${ICU_LIB}.a" /tmp/icu_stubs.o
+    echo "static ICU stub: ${ANDROID_LIBS}/lib/${ICU_LIB}.a"
 done
 # pthread: Android's libc.so contains all pthread symbols — there is NO
 # libpthread.so on Android. A .so stub would add DT_NEEDED libpthread.so
