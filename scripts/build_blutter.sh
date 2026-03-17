@@ -73,7 +73,7 @@ Name: capstone
 Description: Capstone disassembly engine
 Version: 4.0.2
 Libs: -L${libdir} -lcapstone
-Cflags: -I${includedir}
+Cflags: -I${includedir} -I${includedir}/capstone
 CAPSTONE_PC
 echo "capstone.pc written to $ANDROID_LIBS/lib/pkgconfig/"
 
