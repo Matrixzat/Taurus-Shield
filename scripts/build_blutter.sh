@@ -234,6 +234,34 @@ if(NOT TARGET ICU::data)
 endif()
 ICUCMAKE
 
+# ── Create stub .so files for Android system libs (ICU, pthread) ─────────────
+# libicuuc/libicui18n/libpthread are Android system libs — they exist at
+# runtime on device but the NDK cross-compile sysroot has no stub .so for them.
+# We create minimal valid ELF stubs so the linker (-licuuc etc.) is satisfied.
+# --allow-shlib-undefined (added to CMAKE_EXE_LINKER_FLAGS below) then permits
+# the ICU symbols themselves to be resolved at runtime from Android's system.
+SYSROOT_LIBDIR="${TOOLCHAIN}/sysroot/usr/lib/aarch64-linux-android"
+echo "NDK ICU stubs: $(ls ${SYSROOT_LIBDIR}/libicu*.* 2>/dev/null || echo 'none')"
+echo "NDK pthread:   $(ls ${SYSROOT_LIBDIR}/libpthread.* 2>/dev/null || echo 'none')"
+printf 'void __android_sys_stub(void) {}\n' > /tmp/android_sys_stub.c
+for SYSLIB in libicuuc libicui18n libicudata; do
+    "${CC}" --target=aarch64-linux-android31 \
+        --sysroot="${TOOLCHAIN}/sysroot" \
+        -fPIC -shared -nostdlib \
+        -o "${ANDROID_LIBS}/lib/${SYSLIB}.so" /tmp/android_sys_stub.c
+    echo "stub created: ${ANDROID_LIBS}/lib/${SYSLIB}.so"
+done
+# pthread: try NDK sysroot first, create stub only if missing
+if ls "${SYSROOT_LIBDIR}/libpthread."* >/dev/null 2>&1; then
+    echo "libpthread found in NDK sysroot"
+else
+    "${CC}" --target=aarch64-linux-android31 \
+        --sysroot="${TOOLCHAIN}/sysroot" \
+        -fPIC -shared -nostdlib \
+        -o "${ANDROID_LIBS}/lib/libpthread.so" /tmp/android_sys_stub.c
+    echo "stub created: ${ANDROID_LIBS}/lib/libpthread.so"
+fi
+
 # ── custom toolchain: chains NDK + adds capstone include_directories ─────────
 # Capstone 4.x installs to include/capstone/. include_directories() in the
 # toolchain file guarantees the path reaches ALL targets even when cmake's
@@ -266,7 +294,7 @@ exec /usr/bin/cmake \\
     -DCMAKE_FIND_ROOT_PATH="${BLUTTER_DIR}/packages;${ANDROID_LIBS}" \\
     -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \\
     -DCMAKE_MODULE_PATH="/tmp/android_cmake_modules" \\
-    -DCMAKE_EXE_LINKER_FLAGS="-rdynamic" \\
+    -DCMAKE_EXE_LINKER_FLAGS="-rdynamic -Wl,--allow-shlib-undefined -L${TOOLCHAIN}/sysroot/usr/lib/aarch64-linux-android -L${TOOLCHAIN}/sysroot/usr/lib/aarch64-linux-android/31" \\
     -DPKG_CONFIG_USE_CMAKE_PREFIX_PATH=TRUE \\
     "\$@"
 CMAKEWRAP
