@@ -221,6 +221,14 @@ ICUCMAKE
 mkdir -p /tmp/cmake_wrapper
 cat > /tmp/cmake_wrapper/cmake << CMAKEWRAP
 #!/bin/bash
+# Pass --install, --build, --open, --workflow directly to cmake (no NDK flags).
+for arg in "\$@"; do
+    case "\$arg" in
+        --install|--build|--open|--workflow|--find-package)
+            exec /usr/bin/cmake "\$@"
+            ;;
+    esac
+done
 exec /usr/bin/cmake \\
     -DCMAKE_TOOLCHAIN_FILE="${NDK_TOOLCHAIN_FILE}" \\
     -DANDROID_ABI=arm64-v8a \\
