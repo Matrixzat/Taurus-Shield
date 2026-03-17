@@ -251,16 +251,17 @@ for SYSLIB in libicuuc libicui18n libicudata; do
         -o "${ANDROID_LIBS}/lib/${SYSLIB}.so" /tmp/android_sys_stub.c
     echo "stub created: ${ANDROID_LIBS}/lib/${SYSLIB}.so"
 done
-# pthread: try NDK sysroot first, create stub only if missing
-if ls "${SYSROOT_LIBDIR}/libpthread."* >/dev/null 2>&1; then
-    echo "libpthread found in NDK sysroot"
-else
-    "${CC}" --target=aarch64-linux-android31 \
-        --sysroot="${TOOLCHAIN}/sysroot" \
-        -fPIC -shared -nostdlib \
-        -o "${ANDROID_LIBS}/lib/libpthread.so" /tmp/android_sys_stub.c
-    echo "stub created: ${ANDROID_LIBS}/lib/libpthread.so"
-fi
+# pthread: Android's libc.so contains all pthread symbols — there is NO
+# libpthread.so on Android. A .so stub would add DT_NEEDED libpthread.so
+# which the Android linker cannot find at runtime (exit code 126).
+# Use an empty static archive instead: satisfies -lpthread at link time,
+# adds no DT_NEEDED entry, and pthread symbols resolve from libc at runtime.
+printf 'void __pthread_stub(void) {}\n' > /tmp/pthread_stub.c
+"${CC}" --target=aarch64-linux-android31 \
+    --sysroot="${TOOLCHAIN}/sysroot" \
+    -c /tmp/pthread_stub.c -o /tmp/pthread_stub.o
+"${AR}" rcs "${ANDROID_LIBS}/lib/libpthread.a" /tmp/pthread_stub.o
+echo "pthread static stub: ${ANDROID_LIBS}/lib/libpthread.a"
 
 # ── custom toolchain: chains NDK + adds capstone include_directories ─────────
 # Capstone 4.x installs to include/capstone/. include_directories() in the
