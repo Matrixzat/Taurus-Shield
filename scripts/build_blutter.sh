@@ -376,7 +376,7 @@ exec /usr/bin/cmake \\
     -DCMAKE_FIND_ROOT_PATH="${BLUTTER_DIR}/packages;${ANDROID_LIBS}" \\
     -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \\
     -DCMAKE_MODULE_PATH="/tmp/android_cmake_modules" \\
-    -DCMAKE_EXE_LINKER_FLAGS="-rdynamic -Wl,--unresolved-symbols=ignore-all -L${TOOLCHAIN}/sysroot/usr/lib/aarch64-linux-android -L${TOOLCHAIN}/sysroot/usr/lib/aarch64-linux-android/31" \\
+    -DCMAKE_EXE_LINKER_FLAGS="-rdynamic -Wl,--unresolved-symbols=ignore-all -L${TOOLCHAIN}/sysroot/usr/lib/aarch64-linux-android -L${TOOLCHAIN}/sysroot/usr/lib/aarch64-linux-android/31 -llog -ldl -lm -lz" \\
     -DPKG_CONFIG_USE_CMAKE_PREFIX_PATH=TRUE \\
     "\$@"
 CMAKEWRAP
