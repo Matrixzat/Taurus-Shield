@@ -61,6 +61,22 @@ cmake -B /tmp/capstone_build /tmp/capstone_src \
 ninja -C /tmp/capstone_build install
 echo "capstone built: $(ls $ANDROID_LIBS/lib/libcapstone.a 2>/dev/null)"
 
+# Write capstone.pc (capstone 4.x cmake does not generate one)
+mkdir -p "$ANDROID_LIBS/lib/pkgconfig"
+cat > "$ANDROID_LIBS/lib/pkgconfig/capstone.pc" << 'CAPSTONE_PC'
+prefix=/tmp/android_arm64_libs
+exec_prefix=${prefix}
+libdir=${exec_prefix}/lib
+includedir=${prefix}/include
+
+Name: capstone
+Description: Capstone disassembly engine
+Version: 4.0.2
+Libs: -L${libdir} -lcapstone
+Cflags: -I${includedir}
+CAPSTONE_PC
+echo "capstone.pc written to $ANDROID_LIBS/lib/pkgconfig/"
+
 # ── Build fmt for Android ARM64 (static) ─────────────────────────────────────
 echo ""
 echo "[prep 2/3] Building fmt for Android ARM64..."
@@ -241,6 +257,7 @@ exec /usr/bin/cmake \\
     -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \\
     -DCMAKE_MODULE_PATH="/tmp/android_cmake_modules" \\
     -DCMAKE_EXE_LINKER_FLAGS="-rdynamic" \\
+    -DPKG_CONFIG_USE_CMAKE_PREFIX_PATH=TRUE \\
     "\$@"
 CMAKEWRAP
 chmod +x /tmp/cmake_wrapper/cmake
@@ -255,6 +272,9 @@ python3 dartvm_fetch_build.py "${DART_VERSION}" android arm64
 
 echo ""
 echo "[2/3] Building blutter binary (Android ARM64 via NDK)..."
+# Expose our capstone.pc so cmake's FindPkgConfig can find it even in
+# cross-compilation mode (PKG_CONFIG_PATH is appended to PKG_CONFIG_LIBDIR).
+export PKG_CONFIG_PATH="${ANDROID_LIBS}/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 DUMMY_SO="$(mktemp /tmp/dummy_XXXXXX.so)"
 python3 -c "
 import struct
