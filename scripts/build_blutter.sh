@@ -79,35 +79,84 @@ cmake -B /tmp/fmt_build /tmp/fmt_src \
 ninja -C /tmp/fmt_build install
 echo "fmt built: $(ls $ANDROID_LIBS/lib/libfmt.a 2>/dev/null)"
 
-# ── FindICU override: point to NDK sysroot ICU ───────────────────────────────
+# ── ICU shim + compiler launcher ─────────────────────────────────────────────
 echo ""
-echo "[prep 3/3] Setting up ICU for Android NDK..."
-NDK_SYSROOT="$TOOLCHAIN/sysroot"
+echo "[prep 3/3] Setting up ICU shim for Android NDK..."
 mkdir -p /tmp/android_cmake_modules
+mkdir -p /tmp/icu_shim/unicode
 
-# Copy missing ICU C++ headers (e.g. uniset.h) from host libicu-dev into the
-# NDK sysroot. The NDK ships only a subset of ICU C headers; the Dart VM regexp
-# module needs full C++ headers (uniset.h etc.).
-# ICU headers are architecture-independent — safe to reuse from the host.
-NDK_SYSROOT_INCLUDE="$TOOLCHAIN/sysroot/usr/include"
-mkdir -p "$NDK_SYSROOT_INCLUDE/unicode"
-echo "Copying missing ICU headers from host into NDK sysroot..."
-for hdr in /usr/include/unicode/*.h; do
-    fname="$(basename "$hdr")"
-    dest="$NDK_SYSROOT_INCLUDE/unicode/$fname"
-    if [ ! -f "$dest" ]; then
-        cp "$hdr" "$dest"
-        echo "  copied: $fname"
-    fi
-done
+# The NDK ships ICU C API headers but NOT C++ headers (like uniset.h).
+# The host libicu-dev headers break when compiled with __ANDROID__ defined
+# because ICU's platform.h activates Android-specific code paths.
+# Solution: provide a minimal icu::UnicodeSet shim that wraps the NDK C API (USet*).
+cat > /tmp/icu_shim/unicode/uniset.h << 'UNISET_SHIM'
+// Minimal icu::UnicodeSet shim for Android NDK cross-compilation.
+// Wraps the NDK ICU C API (USet*) to provide the C++ interface
+// used by the Dart VM regexp module.
+#pragma once
+#ifdef __cplusplus
+#include <unicode/uset.h>
+#include <unicode/utypes.h>
+
+namespace icu {
+
+class UnicodeSet {
+    USet* _set;
+public:
+    UnicodeSet() : _set(uset_openEmpty()) {}
+    UnicodeSet(UChar32 start, UChar32 end) : _set(uset_open(start, end)) {}
+    ~UnicodeSet() { if (_set) uset_close(_set); }
+
+    UnicodeSet& add(UChar32 c) { uset_add(_set, c); return *this; }
+    UnicodeSet& add(UChar32 start, UChar32 end) {
+        uset_addRange(_set, start, end); return *this;
+    }
+    UnicodeSet& addAll(const UnicodeSet& other) {
+        uset_addAll(_set, other._set); return *this;
+    }
+    UnicodeSet& closeOver(int32_t attribute) {
+        uset_closeOver(_set, attribute); return *this;
+    }
+    UnicodeSet& removeAllStrings() {
+        uset_removeAllStrings(_set); return *this;
+    }
+    int32_t size() const { return uset_size(_set); }
+    bool isEmpty() const { return uset_isEmpty(_set) != 0; }
+    bool contains(UChar32 c) const { return uset_contains(_set, c) != 0; }
+    int32_t getRangeCount() const { return uset_getRangeCount(_set); }
+    UChar32 getRangeStart(int32_t index) const {
+        return uset_getRangeStart(_set, index);
+    }
+    UChar32 getRangeEnd(int32_t index) const {
+        return uset_getRangeEnd(_set, index);
+    }
+};
+
+} // namespace icu
+#endif // __cplusplus
+UNISET_SHIM
+
+echo "ICU shim created at /tmp/icu_shim/unicode/uniset.h"
+
+# Compiler launcher: prepends -I/tmp/icu_shim to every CXX invocation.
+# This is the only reliable way to inject include paths before cmake's own flags,
+# because dartvm_fetch_build.py's CMakeLists.txt overrides CMAKE_CXX_FLAGS.
+# The launcher is called as: <launcher> <compiler> [args...]
+cat > /tmp/cxx_launcher.sh << 'LAUNCHER'
+#!/bin/bash
+compiler="$1"
+shift
+exec "$compiler" -I/tmp/icu_shim "$@"
+LAUNCHER
+chmod +x /tmp/cxx_launcher.sh
 
 cat > /tmp/android_cmake_modules/FindICU.cmake << ICUCMAKE
 # Android NDK FindICU override
-# Headers: via NDK sysroot symlink to host libicu-dev headers
-# Runtime: Android system libicuuc.so / libicui18n.so (API 26+)
+# Headers: NDK C API headers + our uniset.h shim (injected via compiler launcher)
+# Runtime: Android system libicuuc.so / libicui18n.so (API 31+)
 set(ICU_FOUND TRUE)
 set(ICU_VERSION "70.1")
-set(ICU_INCLUDE_DIRS "${NDK_SYSROOT_INCLUDE}")
+set(ICU_INCLUDE_DIRS "")
 set(ICU_LIBRARIES "-licuuc -licui18n")
 
 if(NOT TARGET ICU::uc)
@@ -127,7 +176,7 @@ if(NOT TARGET ICU::data)
 endif()
 ICUCMAKE
 
-# ── cmake wrapper: injects NDK toolchain + our static libs into blutter.py ───
+# ── cmake wrapper: injects NDK toolchain + static libs + compiler launcher ────
 mkdir -p /tmp/cmake_wrapper
 cat > /tmp/cmake_wrapper/cmake << CMAKEWRAP
 #!/bin/bash
@@ -136,6 +185,7 @@ exec /usr/bin/cmake \\
     -DANDROID_ABI=arm64-v8a \\
     -DANDROID_PLATFORM=android-31 \\
     -DANDROID_STL=c++_static \\
+    -DCMAKE_CXX_COMPILER_LAUNCHER=/tmp/cxx_launcher.sh \\
     -DCMAKE_PREFIX_PATH="${ANDROID_LIBS}" \\
     -DCMAKE_MODULE_PATH="/tmp/android_cmake_modules" \\
     -DCMAKE_EXE_LINKER_FLAGS="-rdynamic" \\
