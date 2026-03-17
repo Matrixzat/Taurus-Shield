@@ -105,6 +105,16 @@ typedef int32_t UChar32;
 #define U_CHAR32_IS_TYPEDEF 1
 #endif
 
+// UProperty and UErrorCode are int32_t-compatible ICU enums
+#ifndef U_PROPERTY_IS_TYPEDEF
+typedef int32_t UProperty;
+#define U_PROPERTY_IS_TYPEDEF 1
+#endif
+#ifndef U_ERROR_CODE_IS_TYPEDEF
+typedef int32_t UErrorCode;
+#define U_ERROR_CODE_IS_TYPEDEF 1
+#endif
+
 #ifndef USET_CASE_INSENSITIVE
 #define USET_CASE_INSENSITIVE 2
 #endif
@@ -122,6 +132,8 @@ extern "C" {
     void  uset_addAll(USet* set, const USet* additionalSet);
     void  uset_closeOver(USet* set, int32_t attributes);
     void  uset_removeAllStrings(USet* set);
+    void  uset_complement(USet* set);
+    void  uset_applyIntPropertyValue(USet* set, UProperty prop, int32_t value, UErrorCode* ec);
     int32_t uset_size(const USet* set);
     int32_t uset_isEmpty(const USet* set);
     int32_t uset_contains(const USet* set, UChar32 c);
@@ -151,6 +163,12 @@ public:
     }
     UnicodeSet& removeAllStrings() {
         uset_removeAllStrings(_set); return *this;
+    }
+    UnicodeSet& complement() {
+        uset_complement(_set); return *this;
+    }
+    UnicodeSet& applyIntPropertyValue(UProperty prop, int32_t value, UErrorCode& ec) {
+        uset_applyIntPropertyValue(_set, prop, value, &ec); return *this;
     }
     int32_t size() const { return uset_size(_set); }
     bool isEmpty() const { return uset_isEmpty(_set) != 0; }
