@@ -60,6 +60,20 @@ cmake -B /tmp/capstone_build /tmp/capstone_src \
 
 ninja -C /tmp/capstone_build install
 echo "capstone built: $(ls $ANDROID_LIBS/lib/libcapstone.a 2>/dev/null)"
+echo "capstone headers installed to:"
+find "$ANDROID_LIBS/include" -name "capstone.h" 2>/dev/null | head -5 || echo "(none found)"
+# Ensure capstone.h is accessible at include/ root regardless of cmake install layout
+if [ ! -f "${ANDROID_LIBS}/include/capstone.h" ]; then
+    if [ -f "${ANDROID_LIBS}/include/capstone/capstone.h" ]; then
+        ln -sf "${ANDROID_LIBS}/include/capstone/capstone.h" \
+               "${ANDROID_LIBS}/include/capstone.h"
+        echo "created symlink: include/capstone.h -> include/capstone/capstone.h"
+    else
+        echo "WARNING: capstone.h not found anywhere in $ANDROID_LIBS/include"
+    fi
+else
+    echo "capstone.h already at include root: OK"
+fi
 
 # Write capstone.pc (capstone 4.x cmake does not generate one)
 mkdir -p "$ANDROID_LIBS/lib/pkgconfig"
