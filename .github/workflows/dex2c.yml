@@ -1,0 +1,170 @@
+name: Dex2C Protection
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'Release asset ID of the uploaded ZIP (APK + filter.txt)'
+        required: true
+      job_id:
+        description: 'Unique job ID for artifact naming'
+        required: true
+
+jobs:
+  protect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Download uploaded ZIP
+        run: |
+          curl -fL \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
+            -o input.zip
+          ls -lh input.zip
+          file input.zip
+
+      - name: Extract APK and filter.txt
+        run: |
+          mkdir -p extracted
+          unzip -o input.zip -d extracted
+
+          echo "=== ZIP contents ==="
+          unzip -l input.zip
+
+          APK_COUNT=$(find extracted/ -maxdepth 2 -name "*.apk" -type f | wc -l)
+          APK_PATH=$(find extracted/ -maxdepth 2 -name "*.apk" -type f | head -1)
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "ERROR: No .apk file found in the uploaded ZIP"
+            find extracted/ -type f | head -20
+            exit 1
+          fi
+          if [ "$APK_COUNT" -gt 1 ]; then
+            echo "ERROR: ZIP must contain exactly one .apk file (found $APK_COUNT)"
+            find extracted/ -maxdepth 2 -name "*.apk" -type f
+            exit 1
+          fi
+          echo "Found APK: $APK_PATH ($(wc -c < "$APK_PATH") bytes)"
+
+          FILTER_COUNT=$(find extracted/ -maxdepth 2 -name "filter.txt" -type f | wc -l)
+          FILTER_PATH=$(find extracted/ -maxdepth 2 -name "filter.txt" -type f | head -1)
+          if [ "$FILTER_COUNT" -eq 0 ]; then
+            echo "ERROR: No filter.txt found in the uploaded ZIP"
+            echo "ZIP must contain exactly one .apk file and one filter.txt file"
+            find extracted/ -type f | head -20
+            exit 1
+          fi
+          if [ "$FILTER_COUNT" -gt 1 ]; then
+            echo "ERROR: ZIP must contain exactly one filter.txt (found $FILTER_COUNT)"
+            find extracted/ -maxdepth 2 -name "filter.txt" -type f
+            exit 1
+          fi
+          echo "Found filter: $FILTER_PATH"
+          echo "=== filter.txt contents ==="
+          cat "$FILTER_PATH"
+
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          echo "FILTER_PATH=$FILTER_PATH" >> $GITHUB_ENV
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            python3 python3-pip \
+            openjdk-17-jdk \
+            zipalign \
+            wget unzip git 2>/dev/null
+          echo "java: $(java -version 2>&1 | head -1)"
+          echo "python3: $(python3 --version)"
+
+      - name: Clone dex2c
+        run: |
+          git clone --depth=1 https://github.com/codehasan/dex2c.git
+          ls dex2c/dcc.py
+
+      - name: Install Python dependencies
+        run: |
+          cd dex2c
+          pip3 install -r requirements.txt --break-system-packages
+
+      - name: Download Android NDK
+        run: |
+          cd dex2c
+          wget -q https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+          unzip -q android-ndk-r27c-linux.zip
+          rm android-ndk-r27c-linux.zip
+          ls android-ndk-r27c/ndk-build
+          echo "NDK ready at $(pwd)/android-ndk-r27c"
+
+      - name: Download apktool
+        run: |
+          cd dex2c
+          mkdir -p tools
+          wget -q -O tools/apktool.jar https://bitbucket.org/iBotPeaches/apktool/downloads/apktool_2.10.0.jar
+          ls -lh tools/apktool.jar
+
+      - name: Configure dex2c
+        run: |
+          cd dex2c
+          cat > dcc.cfg << EOF
+          [ndk]
+          ndk_dir = $(pwd)/android-ndk-r27c
+          EOF
+          echo "=== dcc.cfg ==="
+          cat dcc.cfg
+
+      - name: Run Dex2C protection
+        run: |
+          cd dex2c
+          cp "$GITHUB_WORKSPACE/$APK_PATH" input.apk
+          cp "$GITHUB_WORKSPACE/$FILTER_PATH" filter.txt
+
+          echo "Running: python3 dcc.py input.apk -f filter.txt --obfus"
+          python3 dcc.py input.apk -f filter.txt --obfus 2>&1 | tee "$GITHUB_WORKSPACE/dex2c_run.log"
+          exit ${PIPESTATUS[0]}
+        timeout-minutes: 45
+
+      - name: Collect output
+        run: |
+          mkdir -p dex2c_output
+
+          if [ -f dex2c/out.apk ]; then
+            cp dex2c/out.apk dex2c_output/
+            echo "Protected APK: $(wc -c < dex2c_output/out.apk) bytes"
+          else
+            echo "ERROR: out.apk not found — protection did not produce output"
+            find dex2c/ -name "*.apk" -type f | head -10
+            exit 1
+          fi
+
+          if ls dex2c/project-source*.zip 1>/dev/null 2>&1; then
+            cp dex2c/project-source*.zip dex2c_output/
+            echo "Project source ZIP copied"
+          fi
+
+          if [ -f dex2c/compiled_methods.txt ]; then
+            cp dex2c/compiled_methods.txt dex2c_output/
+          fi
+
+          echo "=== Output files ==="
+          find dex2c_output/ -type f | sort
+          echo "=== Size ==="
+          du -sh dex2c_output/ 2>/dev/null || echo "(no output)"
+
+      - name: Upload output artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dex2c-${{ inputs.job_id }}
+          path: dex2c_output/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload error log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-${{ inputs.job_id }}
+          path: dex2c_run.log
+          retention-days: 1
