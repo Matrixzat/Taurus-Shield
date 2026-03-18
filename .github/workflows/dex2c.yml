@@ -120,24 +120,26 @@ jobs:
           wget -q -O tools/apktool.jar \
             https://github.com/iBotPeaches/Apktool/releases/download/v2.10.0/apktool_2.10.0.jar
           ls -lh tools/apktool.jar
-          # Install a thin wrapper so dcc.py can invoke `apktool` from PATH
-          # (using printf to avoid heredoc indentation breaking the YAML)
-          printf '#!/usr/bin/env bash\nexec java -jar "$APKTOOL_JAR" "$@"\n' \
-            | sudo tee /usr/local/bin/apktool > /dev/null
-          sudo chmod +x /usr/local/bin/apktool
-          echo "APKTOOL_JAR=$(pwd)/tools/apktool.jar" >> $GITHUB_ENV
+          # dcc.py hardcodes APKTOOL3 = tools_dir + "/apktool" and runs
+          # `bash tools/apktool d ...` on Linux — so the wrapper MUST live at
+          # tools/apktool (not in PATH).  printf avoids heredoc/YAML issues.
+          printf '#!/usr/bin/env bash\nexec java -jar "%s/tools/apktool.jar" "$@"\n' \
+            "$(pwd)" > tools/apktool
+          chmod +x tools/apktool
+          echo "=== apktool wrapper ==="
+          cat tools/apktool
+          bash tools/apktool --version
 
       - name: Configure dex2c
         run: |
           cd dex2c
           NDK_DIR="$(pwd)/android-ndk-r27c"
-          APKTOOL_JAR_PATH="$(pwd)/tools/apktool.jar"
-          printf '[ndk]\nndk_dir = %s\n\n[apktool]\napktool_path = %s\n' \
-            "$NDK_DIR" "$APKTOOL_JAR_PATH" > dcc.cfg
+          APKTOOL_JAR="$(pwd)/tools/apktool.jar"
+          # dcc.py reads dcc.cfg with json.load() — must be valid JSON
+          printf '{\n  "ndk_dir": "%s",\n  "apktool": "%s"\n}\n' \
+            "$NDK_DIR" "$APKTOOL_JAR" > dcc.cfg
           echo "=== dcc.cfg ==="
           cat dcc.cfg
-          # Verify apktool wrapper works
-          apktool --version || java -jar "$APKTOOL_JAR_PATH" --version
 
       - name: Run Dex2C protection
         run: |
