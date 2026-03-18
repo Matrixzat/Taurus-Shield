@@ -1,0 +1,137 @@
+name: APK Tool
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'Release asset ID of the uploaded file'
+        required: true
+      job_id:
+        description: 'Unique job ID for artifact naming'
+        required: true
+      mode:
+        description: 'Operation mode: decompile or recompile'
+        required: false
+        default: 'decompile'
+      sign_apk:
+        description: 'Whether to sign the output APK (true/false)'
+        required: false
+        default: 'false'
+
+jobs:
+  apktool:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Download uploaded file
+        run: |
+          echo "Mode: ${{ inputs.mode }}"
+          EXT=$([[ "${{ inputs.mode }}" == "decompile" ]] && echo "apk" || echo "zip")
+          curl -fL \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
+            -o "input.$EXT"
+          echo "Downloaded: $(ls -lh input.$EXT)"
+          echo "EXT=$EXT" >> $GITHUB_ENV
+
+      - name: Install Java and tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y openjdk-17-jdk zipalign apksigner wget unzip 2>/dev/null
+          echo "java: $(java -version 2>&1 | head -1)"
+
+      - name: Download APKTool
+        run: |
+          APKTOOL_URL=$(curl -s https://api.github.com/repos/iBotPeaches/Apktool/releases/latest \
+            | grep "browser_download_url" \
+            | grep "apktool_[0-9]" \
+            | grep "\.jar" \
+            | head -1 \
+            | cut -d '"' -f 4)
+          echo "Downloading apktool from: $APKTOOL_URL"
+          wget -q -O apktool.jar "$APKTOOL_URL"
+          echo "apktool.jar: $(ls -lh apktool.jar)"
+
+      - name: Decompile APK
+        if: inputs.mode == 'decompile'
+        run: |
+          mkdir -p decompiled
+          echo "=== Starting decompilation ==="
+          java -jar apktool.jar d input.apk -o decompiled/ --no-crunch 2>&1
+          echo "=== Decompiled contents ==="
+          ls -la decompiled/
+          FILE_COUNT=$(find decompiled/ -type f | wc -l)
+          echo "Total files: $FILE_COUNT"
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "ERROR: Decompilation produced no output"
+            exit 1
+          fi
+
+      - name: Recompile project
+        if: inputs.mode == 'recompile'
+        run: |
+          mkdir -p recompiled_src
+          echo "=== Extracting project ZIP ==="
+          unzip -o input.zip -d recompiled_src/
+          echo "=== Extracted contents ==="
+          ls -la recompiled_src/
+
+          # Find the project root (folder containing AndroidManifest.xml)
+          PROJECT_DIR=$(find recompiled_src/ -name "AndroidManifest.xml" -not -path "*/original/*" | head -1 | xargs dirname)
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "ERROR: No AndroidManifest.xml found — invalid project structure"
+            find recompiled_src/ -type f | head -30
+            exit 1
+          fi
+          echo "Project root: $PROJECT_DIR"
+
+          mkdir -p recompile_output
+          echo "=== Starting recompilation ==="
+          java -jar apktool.jar b "$PROJECT_DIR" -o recompile_output/out.apk 2>&1
+          if [ ! -f recompile_output/out.apk ]; then
+            echo "ERROR: Recompilation failed — out.apk not produced"
+            exit 1
+          fi
+          echo "Recompiled APK: $(ls -lh recompile_output/out.apk)"
+
+      - name: Sign APK
+        if: inputs.mode == 'recompile' && inputs.sign_apk == 'true'
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/release.keystore
+
+          echo "Zipaligning APK..."
+          zipalign -f 4 recompile_output/out.apk recompile_output/out_aligned.apk
+
+          echo "Signing APK..."
+          apksigner sign \
+            --ks /tmp/release.keystore \
+            --ks-key-alias "${{ secrets.KEYSTORE_ALIAS }}" \
+            --ks-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
+            --key-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
+            --out recompile_output/out_signed.apk \
+            recompile_output/out_aligned.apk
+
+          mv recompile_output/out_signed.apk recompile_output/out.apk
+          rm -f recompile_output/out_aligned.apk /tmp/release.keystore
+          echo "Signed APK: $(ls -lh recompile_output/out.apk)"
+          apksigner verify recompile_output/out.apk && echo "Signature verified OK"
+
+      - name: Upload decompiled output
+        if: inputs.mode == 'decompile'
+        uses: actions/upload-artifact@v4
+        with:
+          name: apktool-${{ inputs.job_id }}
+          path: decompiled/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload recompiled APK
+        if: inputs.mode == 'recompile'
+        uses: actions/upload-artifact@v4
+        with:
+          name: apktool-${{ inputs.job_id }}
+          path: recompile_output/out.apk
+          if-no-files-found: error
+          retention-days: 7
