@@ -67,7 +67,7 @@ jobs:
         run: |
           mkdir -p decompiled
           echo "=== Starting decompilation ==="
-          java -jar apktool.jar d input.apk -o decompiled/ --no-crunch 2>&1
+          java -jar apktool.jar d input.apk -o decompiled/ -f 2>&1
           echo "=== Decompiled contents ==="
           ls -la decompiled/
           FILE_COUNT=$(find decompiled/ -type f | wc -l)
