@@ -34,47 +34,27 @@ jobs:
           echo "=== ZIP contents (first 30 entries) ==="
           unzip -l input.zip | head -35
 
-          # Find libapp.so — prefer arm64 first
+          # Find libapp.so — prefer arm64 path first
           SO_PATH=$(find extracted/ -name "libapp.so" | grep -i "arm64" | head -1)
           if [ -z "$SO_PATH" ]; then
             SO_PATH=$(find extracted/ -name "libapp.so" | head -1)
           fi
           if [ -z "$SO_PATH" ]; then
             echo "Cannot find libapp.so in the uploaded file"
+            find extracted/ -type f | head -20
             exit 1
           fi
           echo "Found: $SO_PATH ($(wc -c < "$SO_PATH") bytes)"
 
-          # Detect input structure and build what blutter expects:
-          #   blutter needs a directory that HAS lib/arm64-v8a/libapp.so inside it.
-          #
-          # Case A — full APK:   extracted/lib/arm64-v8a/libapp.so
-          # Case B — arm64 ZIP:  extracted/libapp.so   (or extracted/arm64-v8a/libapp.so)
-          #
-          SO_DIR_ABS=$(cd "$(dirname "$SO_PATH")" && pwd)
-          LIB_DIR_ABS=$(dirname "$SO_DIR_ABS")
-
-          if [[ "$(basename "$SO_DIR_ABS")" == *"arm64"* ]] && \
-             [[ "$(basename "$LIB_DIR_ABS")" == "lib" ]]; then
-            # Case A: already in lib/arm64-v8a/ → APP_DIR is the parent of lib/
-            APP_DIR=$(dirname "$LIB_DIR_ABS")
-            echo "Input shape: full APK — APP_DIR=$APP_DIR"
-          else
-            # Case B: flat ZIP — create the lib/arm64-v8a/ structure blutter needs
-            mkdir -p app_stage/lib/arm64-v8a
-            # Copy all .so files from the same directory as libapp.so
-            cp "$(dirname "$SO_PATH")"/*.so app_stage/lib/arm64-v8a/ 2>/dev/null || true
-            # Make sure libapp.so is there even if the glob missed it
-            cp "$SO_PATH" app_stage/lib/arm64-v8a/libapp.so
-            APP_DIR=$(cd app_stage && pwd)
-            echo "Input shape: flat/arm64 ZIP — created structure at $APP_DIR"
-          fi
-
-          echo "APP_DIR contents:"
-          ls -lR "$APP_DIR/lib" 2>/dev/null || ls "$APP_DIR"
+          # blutter expects the DIRECTORY that directly contains libapp.so
+          # (it does: os.path.join(indir, 'libapp.so'))
+          # So just pass the parent directory of wherever we found it.
+          LIB_DIR=$(cd "$(dirname "$SO_PATH")" && pwd)
+          echo "Lib dir for blutter: $LIB_DIR"
+          ls -lh "$LIB_DIR"
 
           echo "SO_PATH=$SO_PATH" >> $GITHUB_ENV
-          echo "APP_DIR=$APP_DIR" >> $GITHUB_ENV
+          echo "LIB_DIR=$LIB_DIR" >> $GITHUB_ENV
 
       - name: Install build dependencies
         run: |
@@ -94,9 +74,9 @@ jobs:
       - name: Run blutter analysis
         run: |
           mkdir -p blutter_output
-          echo "Analyzing app dir: $APP_DIR"
+          echo "Analyzing: $LIB_DIR"
           cd blutter
-          python3 blutter.py "$APP_DIR" "$GITHUB_WORKSPACE/blutter_output" 2>&1 | tee "$GITHUB_WORKSPACE/blutter_run.log"
+          python3 blutter.py "$LIB_DIR" "$GITHUB_WORKSPACE/blutter_output" 2>&1 | tee "$GITHUB_WORKSPACE/blutter_run.log"
           exit ${PIPESTATUS[0]}
         timeout-minutes: 35
 
