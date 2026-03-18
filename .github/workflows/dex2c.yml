@@ -147,8 +147,14 @@ jobs:
           cp "$GITHUB_WORKSPACE/$APK_PATH" input.apk
           cp "$GITHUB_WORKSPACE/$FILTER_PATH" filter.txt
 
-          echo "Running: python3 dcc.py input.apk -f filter.txt --obfus"
-          python3 dcc.py input.apk -f filter.txt --obfus 2>&1 | tee "$GITHUB_WORKSPACE/dex2c_run.log"
+          # Correct dcc.py CLI (codehasan/dex2c master):
+          #   -a/--input  : input APK  (required)
+          #   -o/--out    : output APK (required)
+          #   --filter    : method filter file (default filter.txt)
+          #   -p/--obfuscate : obfuscate string constants
+          echo "Running: python3 dcc.py -a input.apk -o out.apk --filter filter.txt -p"
+          python3 dcc.py -a input.apk -o out.apk --filter filter.txt -p \
+            2>&1 | tee "$GITHUB_WORKSPACE/dex2c_run.log"
           exit ${PIPESTATUS[0]}
         timeout-minutes: 45
 
