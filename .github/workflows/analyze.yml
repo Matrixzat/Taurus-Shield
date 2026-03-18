@@ -1,0 +1,72 @@
+name: Analyze Flutter App (Blutter)
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'Release asset ID of the uploaded arm64-v8a.zip'
+        required: true
+      job_id:
+        description: 'Unique job ID for artifact naming'
+        required: true
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Download uploaded ZIP
+        run: |
+          curl -fL \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
+            -o input.zip
+          ls -lh input.zip
+
+      - name: Extract libapp.so
+        run: |
+          mkdir -p extracted
+          unzip -o input.zip -d extracted
+          SO_PATH=$(find extracted/ -name "libapp.so" | grep -i "arm64" | head -1)
+          if [ -z "$SO_PATH" ]; then
+            SO_PATH=$(find extracted/ -name "libapp.so" | head -1)
+          fi
+          if [ -z "$SO_PATH" ]; then
+            echo "ERROR: libapp.so not found in ZIP"
+            exit 1
+          fi
+          echo "Found: $SO_PATH"
+          echo "SO_PATH=$SO_PATH" >> $GITHUB_ENV
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y cmake ninja-build clang libicu-dev git python3-pip 2>/dev/null
+
+      - name: Clone blutter
+        run: git clone --depth=1 https://github.com/worawit/blutter.git
+
+      - name: Install Python dependencies
+        run: pip3 install -q -r blutter/requirements.txt 2>/dev/null || true
+
+      - name: Run blutter analysis
+        run: |
+          mkdir -p blutter_output
+          cd blutter
+          python3 blutter.py "$GITHUB_WORKSPACE/$SO_PATH" "$GITHUB_WORKSPACE/blutter_output" 2>&1
+        timeout-minutes: 35
+
+      - name: Show output summary
+        run: |
+          find blutter_output/ -type f | sort | head -40
+          du -sh blutter_output/ 2>/dev/null || echo "(no output)"
+
+      - name: Upload output artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: blutter-${{ inputs.job_id }}
+          path: blutter_output/
+          if-no-files-found: warn
+          retention-days: 7
