@@ -9,6 +9,10 @@ on:
       job_id:
         description: 'Unique job ID for artifact naming'
         required: true
+      sign_apk:
+        description: 'Whether to sign the output APK with a debug key (true/false)'
+        required: false
+        default: 'true'
 
 jobs:
   protect:
@@ -74,7 +78,7 @@ jobs:
           sudo apt-get install -y \
             python3 python3-pip \
             openjdk-17-jdk \
-            zipalign \
+            zipalign apksigner \
             wget unzip git 2>/dev/null
           echo "java: $(java -version 2>&1 | head -1)"
           echo "python3: $(python3 --version)"
@@ -152,6 +156,43 @@ jobs:
           find dex2c_output/ -type f | sort
           echo "=== Size ==="
           du -sh dex2c_output/ 2>/dev/null || echo "(no output)"
+
+      - name: Sign APK with debug key
+        if: inputs.sign_apk == 'true'
+        run: |
+          if [ ! -f dex2c_output/out.apk ]; then
+            echo "No out.apk to sign — skipping"
+            exit 0
+          fi
+
+          echo "Generating debug keystore..."
+          keytool -genkeypair \
+            -keystore debug.keystore \
+            -alias debugkey \
+            -keyalg RSA -keysize 2048 \
+            -validity 10000 \
+            -storepass android \
+            -keypass android \
+            -dname "CN=Debug,OU=Debug,O=Debug,L=Unknown,ST=Unknown,C=US" \
+            2>/dev/null
+
+          echo "Zipaligning APK..."
+          zipalign -f 4 dex2c_output/out.apk dex2c_output/out_aligned.apk
+
+          echo "Signing APK..."
+          apksigner sign \
+            --ks debug.keystore \
+            --ks-key-alias debugkey \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out dex2c_output/out_signed.apk \
+            dex2c_output/out_aligned.apk
+
+          mv dex2c_output/out_signed.apk dex2c_output/out.apk
+          rm -f dex2c_output/out_aligned.apk debug.keystore
+
+          echo "APK signed successfully: $(wc -c < dex2c_output/out.apk) bytes"
+          apksigner verify dex2c_output/out.apk && echo "Signature verified OK" || echo "WARNING: Signature verification failed"
 
       - name: Upload output artifact
         uses: actions/upload-artifact@v4
