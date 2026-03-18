@@ -22,6 +22,8 @@ jobs:
   apktool:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
 
     steps:
       - name: Download uploaded file
