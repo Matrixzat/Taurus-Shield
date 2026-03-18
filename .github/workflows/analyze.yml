@@ -26,6 +26,14 @@ jobs:
           ls -lh input.zip
           file input.zip
 
+      - name: Delete uploaded asset from release
+        if: always()
+        run: |
+          curl -s -X DELETE \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" || true
+          echo "Upload slot cleaned up"
+
       - name: Extract libapp.so
         run: |
           mkdir -p extracted
@@ -94,7 +102,7 @@ jobs:
           name: blutter-${{ inputs.job_id }}
           path: blutter_output/
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 1
 
       - name: Upload error log on failure
         if: failure()
