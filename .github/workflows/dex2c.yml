@@ -152,8 +152,8 @@ jobs:
           #   -o/--out    : output APK (required)
           #   --filter    : method filter file (default filter.txt)
           #   -p/--obfuscate : obfuscate string constants
-          echo "Running: python3 dcc.py -a input.apk -o out.apk --filter filter.txt -p"
-          python3 dcc.py -a input.apk -o out.apk --filter filter.txt -p \
+          echo "Running: python3 dcc.py -a input.apk -o out.apk --filter filter.txt -p --allow-global"
+          python3 dcc.py -a input.apk -o out.apk --filter filter.txt -p --allow-global \
             2>&1 | tee "$GITHUB_WORKSPACE/dex2c_run.log"
           exit ${PIPESTATUS[0]}
         timeout-minutes: 45
