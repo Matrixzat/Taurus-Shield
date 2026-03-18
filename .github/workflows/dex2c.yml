@@ -157,7 +157,14 @@ jobs:
           echo "=== Size ==="
           du -sh dex2c_output/ 2>/dev/null || echo "(no output)"
 
-      - name: Sign APK with debug key
+      - name: Checkout repo for signing key
+        if: inputs.sign_apk == 'true'
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/signing
+          path: _repo
+
+      - name: Sign APK with project key
         if: inputs.sign_apk == 'true'
         run: |
           if [ ! -f dex2c_output/out.apk ]; then
@@ -165,31 +172,26 @@ jobs:
             exit 0
           fi
 
-          echo "Generating debug keystore..."
-          keytool -genkeypair \
-            -keystore debug.keystore \
-            -alias debugkey \
-            -keyalg RSA -keysize 2048 \
-            -validity 10000 \
-            -storepass android \
-            -keypass android \
-            -dname "CN=Debug,OU=Debug,O=Debug,L=Unknown,ST=Unknown,C=US" \
-            2>/dev/null
+          KS="_repo/.github/signing/matrix_hbc.keystore"
+          if [ ! -f "$KS" ]; then
+            echo "ERROR: Keystore not found at $KS"
+            exit 1
+          fi
 
           echo "Zipaligning APK..."
           zipalign -f 4 dex2c_output/out.apk dex2c_output/out_aligned.apk
 
-          echo "Signing APK..."
+          echo "Signing APK with project key..."
           apksigner sign \
-            --ks debug.keystore \
-            --ks-key-alias debugkey \
-            --ks-pass pass:android \
-            --key-pass pass:android \
+            --ks "$KS" \
+            --ks-key-alias matrix_hbc_key \
+            --ks-pass pass:Matrix@2026 \
+            --key-pass pass:Matrix@2026 \
             --out dex2c_output/out_signed.apk \
             dex2c_output/out_aligned.apk
 
           mv dex2c_output/out_signed.apk dex2c_output/out.apk
-          rm -f dex2c_output/out_aligned.apk debug.keystore
+          rm -f dex2c_output/out_aligned.apk
 
           echo "APK signed successfully: $(wc -c < dex2c_output/out.apk) bytes"
           apksigner verify dex2c_output/out.apk && echo "Signature verified OK" || echo "WARNING: Signature verification failed"
