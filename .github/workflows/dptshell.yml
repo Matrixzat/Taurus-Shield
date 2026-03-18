@@ -1,0 +1,178 @@
+name: DPT Shell Protection
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'Release asset ID of the uploaded ZIP (APK + optional rules.txt)'
+        required: true
+      job_id:
+        description: 'Unique job ID for artifact naming'
+        required: true
+      sign_apk:
+        description: 'Whether to sign the output APK with a debug key (true/false)'
+        required: false
+        default: 'true'
+
+jobs:
+  protect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Download uploaded ZIP
+        run: |
+          curl -fL \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
+            -o input.zip
+          ls -lh input.zip
+          file input.zip
+
+      - name: Extract APK and optional rules.txt
+        run: |
+          mkdir -p extracted
+          set +e
+          unzip -o input.zip -d extracted
+          UNZIP_RC=$?
+          set -e
+          if [ "$UNZIP_RC" -gt 1 ]; then
+            echo "ERROR: unzip failed with code $UNZIP_RC — ZIP may be corrupted"
+            exit 1
+          fi
+
+          echo "=== ZIP contents ==="
+          unzip -l input.zip || true
+
+          APK_COUNT=$(find extracted/ -name "*.apk" -type f | wc -l)
+          APK_PATH=$(find extracted/ -name "*.apk" -type f | head -1)
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "ERROR: No .apk file found in the uploaded ZIP"
+            find extracted/ -type f | head -20
+            exit 1
+          fi
+          if [ "$APK_COUNT" -gt 1 ]; then
+            echo "ERROR: ZIP must contain exactly one .apk file (found $APK_COUNT)"
+            find extracted/ -name "*.apk" -type f
+            exit 1
+          fi
+          echo "Found APK: $APK_PATH ($(wc -c < "$APK_PATH") bytes)"
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+
+          # rules.txt is optional — if present, pass it to dpt.jar via -r
+          RULES_PATH=$(find extracted/ -name "rules.txt" -type f | head -1)
+          if [ -n "$RULES_PATH" ]; then
+            echo "Found rules.txt: $RULES_PATH"
+            echo "=== rules.txt contents ==="
+            cat "$RULES_PATH"
+            echo "RULES_PATH=$RULES_PATH" >> $GITHUB_ENV
+            echo "HAS_RULES=true" >> $GITHUB_ENV
+          else
+            echo "No rules.txt found — all classes will be protected"
+            echo "HAS_RULES=false" >> $GITHUB_ENV
+          fi
+
+      - name: Install Java
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y openjdk-17-jdk zipalign apksigner wget unzip 2>/dev/null
+          echo "java: $(java -version 2>&1 | head -1)"
+
+      - name: Download dpt-shell
+        run: |
+          # Download the latest dpt-shell release ZIP
+          RELEASE_URL=$(curl -s https://api.github.com/repos/luoyesiqiu/dpt-shell/releases/latest \
+            | python3 -c "import sys,json; assets=json.load(sys.stdin)['assets']; print(next(a['browser_download_url'] for a in assets if a['name'].endswith('.zip')))")
+          echo "Downloading dpt-shell from: $RELEASE_URL"
+          wget -q -O dpt-shell.zip "$RELEASE_URL"
+          unzip -q dpt-shell.zip -d dpt-shell-release
+          echo "=== dpt-shell release contents ==="
+          find dpt-shell-release/ -type f | head -20
+          # Find dpt.jar wherever it landed
+          DPT_JAR=$(find dpt-shell-release/ -name "dpt.jar" | head -1)
+          if [ -z "$DPT_JAR" ]; then
+            echo "ERROR: dpt.jar not found in release ZIP"
+            exit 1
+          fi
+          echo "Found dpt.jar at: $DPT_JAR"
+          cp "$DPT_JAR" dpt.jar
+          java -jar dpt.jar -v
+
+      - name: Run DPT Shell protection
+        run: |
+          cp "$GITHUB_WORKSPACE/$APK_PATH" input.apk
+          mkdir -p dpt_output
+
+          if [ "$HAS_RULES" = "true" ]; then
+            cp "$GITHUB_WORKSPACE/$RULES_PATH" rules.txt
+            echo "Running: java -jar dpt.jar -f input.apk -o dpt_output/ -e x86,x86_64 -x -r rules.txt"
+            java -jar dpt.jar -f input.apk -o dpt_output/ -e x86,x86_64 -x -r rules.txt \
+              2>&1 | tee dpt_run.log
+          else
+            echo "Running: java -jar dpt.jar -f input.apk -o dpt_output/ -e x86,x86_64 -x"
+            java -jar dpt.jar -f input.apk -o dpt_output/ -e x86,x86_64 -x \
+              2>&1 | tee dpt_run.log
+          fi
+          exit ${PIPESTATUS[0]}
+        timeout-minutes: 20
+
+      - name: Collect output
+        run: |
+          echo "=== dpt_output contents ==="
+          find dpt_output/ -type f | sort
+
+          # Find the protected APK — dpt-shell places it in the output dir
+          OUT_APK=$(find dpt_output/ -name "*.apk" -type f | head -1)
+          if [ -z "$OUT_APK" ]; then
+            echo "ERROR: No protected APK found in dpt_output/"
+            exit 1
+          fi
+          echo "Protected APK: $OUT_APK ($(wc -c < "$OUT_APK") bytes)"
+          # Normalise filename to out.apk for consistent artifact handling
+          cp "$OUT_APK" dpt_output/out.apk
+          echo "OUT_APK=dpt_output/out.apk" >> $GITHUB_ENV
+
+      - name: Sign APK
+        if: inputs.sign_apk == 'true'
+        run: |
+          if [ ! -f dpt_output/out.apk ]; then
+            echo "No out.apk to sign — skipping"
+            exit 0
+          fi
+
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/release.keystore
+
+          echo "Zipaligning APK..."
+          zipalign -f 4 dpt_output/out.apk dpt_output/out_aligned.apk
+
+          echo "Signing APK..."
+          apksigner sign \
+            --ks /tmp/release.keystore \
+            --ks-key-alias "${{ secrets.KEYSTORE_ALIAS }}" \
+            --ks-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
+            --key-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
+            --out dpt_output/out_signed.apk \
+            dpt_output/out_aligned.apk
+
+          mv dpt_output/out_signed.apk dpt_output/out.apk
+          rm -f dpt_output/out_aligned.apk /tmp/release.keystore
+
+          echo "APK signed: $(wc -c < dpt_output/out.apk) bytes"
+          apksigner verify dpt_output/out.apk && echo "Signature verified OK" || echo "WARNING: Signature verification failed"
+
+      - name: Upload output artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dptshell-${{ inputs.job_id }}
+          path: dpt_output/out.apk
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload error log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-${{ inputs.job_id }}
+          path: dpt_run.log
+          retention-days: 1
