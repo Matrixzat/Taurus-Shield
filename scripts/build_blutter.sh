@@ -477,8 +477,9 @@ rm -f "${DUMMY_SO}"
 # With --unresolved-symbols=ignore-all, missing stubs become UNDEF entries in
 # .dynsym, causing "cannot locate symbol" at dlopen time.  Detect them all
 # here, generate stubs, and re-link so the final binary has zero UNDEF ICU.
-BINARY_P2="${BLUTTER_DIR}/bin/blutter_dartvm${DART_VERSION}_android_arm64"
-BUILD_DIR_P2="${BLUTTER_DIR}/build/blutter_dartvm${DART_VERSION}_android_arm64"
+# After "cd ${BLUTTER_DIR}" above, cwd IS blutter/ — use relative paths
+BINARY_P2="bin/blutter_dartvm${DART_VERSION}_android_arm64"
+BUILD_DIR_P2="build/blutter_dartvm${DART_VERSION}_android_arm64"
 if [ -f "${BINARY_P2}" ] && [ -d "${BUILD_DIR_P2}" ]; then
     echo "PASS 2: scanning ${BINARY_P2} for undefined ICU symbols..."
     # llvm-readelf prints UNDEF entries; sed strips @VERSION suffixes
