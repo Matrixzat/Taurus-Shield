@@ -34,6 +34,14 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
             -o "input.$EXT"
           echo "Downloaded: $(ls -lh input.$EXT)"
+
+      - name: Delete uploaded asset from release
+        if: always()
+        run: |
+          curl -s -X DELETE \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" || true
+          echo "Upload slot cleaned up"
           echo "EXT=$EXT" >> $GITHUB_ENV
 
       - name: Install Java and tools
@@ -125,7 +133,7 @@ jobs:
           name: apktool-${{ inputs.job_id }}
           path: decompiled/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
 
       - name: Upload recompiled APK
         if: inputs.mode == 'recompile'
@@ -134,4 +142,4 @@ jobs:
           name: apktool-${{ inputs.job_id }}
           path: recompile_output/out.apk
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
