@@ -1,0 +1,207 @@
+name: Android ID Spoofer
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'GitHub release asset ID of the uploaded APK'
+        required: true
+      job_id:
+        description: 'Job correlation ID for artifact naming'
+        required: true
+      android_id:
+        description: '16-char hex Android ID to inject'
+        required: true
+      sign_apk:
+        description: 'Whether to sign the rebuilt APK (true/false)'
+        required: false
+        default: 'true'
+
+jobs:
+  spoof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Download uploaded APK asset
+        run: |
+          curl -sL \
+            -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" \
+            -o input.apk
+          echo "APK size: $(du -sh input.apk | cut -f1)"
+          file input.apk
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Download apktool and uber-apk-signer
+        run: |
+          curl -sL \
+            https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar \
+            -o apktool.jar
+          curl -sL \
+            https://github.com/patrickfav/uber-apk-signer/releases/download/v1.3.0/uber-apk-signer-1.3.0.jar \
+            -o signer.jar
+          echo "Tools downloaded"
+
+      - name: Decompile APK
+        run: |
+          java -jar apktool.jar d input.apk -o decompiled -f
+          echo "Decompilation complete"
+          ls decompiled/
+
+      - name: Patch smali files
+        env:
+          ANDROID_ID: ${{ github.event.inputs.android_id }}
+        run: |
+          python3 - << 'PYEOF'
+          import os, re
+
+          android_id  = os.environ['ANDROID_ID'].strip().lower()
+          serial_part = android_id[:12]
+          decompile_dir = 'decompiled'
+          patch_count = 0
+
+          def generate_imei():
+              import random
+              digits = [random.randint(0, 9) for _ in range(14)]
+              total = sum(
+                  (d * 2 // 10 + d * 2 % 10) if i % 2 == 1 else d
+                  for i, d in enumerate(digits)
+              )
+              check = (10 - total % 10) % 10
+              return ''.join(str(d) for d in digits) + str(check)
+
+          imei = generate_imei()
+
+          def patch_smali(path):
+              global patch_count
+              try:
+                  with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                      content = f.read()
+                  original = content
+
+                  # Pattern 1: "android_id" key pre-loaded before getString call
+                  content = re.sub(
+                      r'(const-string [pv]\d+,\s*"android_id"'
+                      r'[\s\S]{0,500}?'
+                      r'invoke-static \{[^}]*\}, Landroid/provider/Settings\$Secure;'
+                      r'->getString\(Landroid/content/ContentResolver;Ljava/lang/String;\)'
+                      r'Ljava/lang/String;'
+                      r'[\s\S]{0,80}?)'
+                      r'move-result-object ([pv]\d+)',
+                      lambda m: m.group(1) + f'const-string {m.group(2)}, "{android_id}"',
+                      content
+                  )
+
+                  # Pattern 2: Build.SERIAL field read
+                  content = re.sub(
+                      r'sget-object ([pv]\d+), Landroid/os/Build;->SERIAL:Ljava/lang/String;',
+                      f'const-string \\1, "{serial_part}"',
+                      content
+                  )
+
+                  # Pattern 3: TelephonyManager.getDeviceId()
+                  content = re.sub(
+                      r'(invoke-virtual \{[^}]*\}, Landroid/telephony/TelephonyManager;'
+                      r'->getDeviceId\(\)Ljava/lang/String;'
+                      r'[\s\S]{0,80}?)'
+                      r'move-result-object ([pv]\d+)',
+                      lambda m: m.group(1) + f'const-string {m.group(2)}, "{imei}"',
+                      content
+                  )
+
+                  # Pattern 4: Generic Settings$Secure.getString — only when "android_id" nearby
+                  def replace_generic(m):
+                      if '"android_id"' in m.group(0):
+                          return m.group(1) + f'const-string {m.group(2)}, "{android_id}"'
+                      return m.group(0)
+
+                  content = re.sub(
+                      r'(invoke-static \{[^}]*\}, Landroid/provider/Settings\$Secure;'
+                      r'->getString\(Landroid/content/ContentResolver;Ljava/lang/String;\)'
+                      r'Ljava/lang/String;'
+                      r'[\s\S]{0,80}?)'
+                      r'move-result-object ([pv]\d+)',
+                      replace_generic,
+                      content
+                  )
+
+                  if content != original:
+                      with open(path, 'w', encoding='utf-8') as f:
+                          f.write(content)
+                      patch_count += 1
+                      print(f'  Patched: {os.path.relpath(path, decompile_dir)}')
+              except Exception as e:
+                  print(f'  Warning {path}: {e}')
+
+          smali_dirs = [
+              d for d in os.listdir(decompile_dir)
+              if d.startswith('smali') and os.path.isdir(os.path.join(decompile_dir, d))
+          ]
+          for sd in smali_dirs:
+              for root, _, files in os.walk(os.path.join(decompile_dir, sd)):
+                  for fname in files:
+                      if fname.endswith('.smali'):
+                          patch_smali(os.path.join(root, fname))
+
+          print(f'Files patched: {patch_count}')
+          with open('patch_count.txt', 'w') as f:
+              f.write(str(patch_count))
+          PYEOF
+
+      - name: Rebuild APK
+        run: |
+          java -jar apktool.jar b decompiled --use-aapt2 -o rebuilt.apk \
+            || java -jar apktool.jar b decompiled -o rebuilt.apk
+          echo "Rebuild complete — $(du -sh rebuilt.apk | cut -f1)"
+
+      - name: Sign APK
+        run: |
+          SIGN="${{ github.event.inputs.sign_apk }}"
+          if [ "$SIGN" = "true" ]; then
+            java -jar signer.jar -a rebuilt.apk -o signed_out --overwrite
+            SIGNED=$(find signed_out -name "*.apk" | head -1)
+            if [ -z "$SIGNED" ]; then
+              echo "Signer produced no file — using unsigned rebuild"
+              SIGNED="rebuilt.apk"
+            fi
+            cp "$SIGNED" spoofed.apk
+            echo "APK signed. Size: $(du -sh spoofed.apk | cut -f1)"
+          else
+            cp rebuilt.apk spoofed.apk
+            echo "Signing skipped (sign_apk=false). Size: $(du -sh spoofed.apk | cut -f1)"
+          fi
+
+      - name: Collect output
+        run: |
+          mkdir -p output_pkg
+          cp spoofed.apk output_pkg/spoofed.apk
+          PATCHES=$(cat patch_count.txt 2>/dev/null || echo "0")
+          {
+            echo "Android ID : ${{ github.event.inputs.android_id }}"
+            echo "Patches    : $PATCHES smali file(s)"
+            echo "Status     : Spoofed and signed"
+          } > output_pkg/spoof_info.txt
+          echo "Output package ready"
+          ls -lh output_pkg/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spoof-${{ github.event.inputs.job_id }}
+          path: output_pkg/
+          retention-days: 1
+
+      - name: Delete uploaded asset
+        if: always()
+        run: |
+          curl -s -X DELETE \
+            -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" \
+            || true
