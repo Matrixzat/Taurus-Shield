@@ -38,10 +38,90 @@ jobs:
           pip3 install reflutter==0.8.6
           echo "reFlutter installed"
 
+      - name: Normalise APK for reFlutter
+        run: |
+          python3 - << 'PYEOF'
+          import zipfile, os, shutil, sys
+
+          src = "input.apk"
+          dst = "input_fixed.apk"
+
+          # Priority order for libapp.so architectures
+          ARCH_PRIORITY = ["arm64-v8a", "armeabi-v7a", "x86_64", "x86"]
+
+          with zipfile.ZipFile(src, "r") as zin:
+              names = zin.namelist()
+
+              # Find libapp.so — pick the best architecture available
+              libapp_entry = None
+              for arch in ARCH_PRIORITY:
+                  candidate = f"lib/{arch}/libapp.so"
+                  if candidate in names:
+                      libapp_entry = candidate
+                      print(f"Found libapp.so at: {candidate}")
+                      break
+
+              if libapp_entry is None:
+                  # Last resort: any path containing libapp.so
+                  for n in names:
+                      if n.endswith("libapp.so"):
+                          libapp_entry = n
+                          print(f"Found libapp.so at non-standard path: {n}")
+                          break
+
+              if libapp_entry is None:
+                  print("ERROR: libapp.so not found in APK at all.")
+                  sys.exit(1)
+
+              # Check if it's already at arm64-v8a and already stored (no compression)
+              info = zin.getinfo(libapp_entry)
+              already_ok = (
+                  libapp_entry == "lib/arm64-v8a/libapp.so"
+                  and info.compress_type == zipfile.ZIP_STORED
+              )
+
+              if already_ok:
+                  print("APK is already in correct format — no preprocessing needed.")
+                  shutil.copy(src, dst)
+              else:
+                  print(f"Preprocessing APK: moving/uncompressing libapp.so -> lib/arm64-v8a/libapp.so")
+                  libapp_data = zin.read(libapp_entry)
+
+                  with zipfile.ZipFile(dst, "w", allowZip64=True) as zout:
+                      for item in zin.infolist():
+                          data = zin.read(item.filename)
+
+                          if item.filename == libapp_entry and libapp_entry != "lib/arm64-v8a/libapp.so":
+                              # Skip the original entry — we'll write it at the canonical path
+                              continue
+                          elif item.filename == libapp_entry or item.filename == "lib/arm64-v8a/libapp.so":
+                              # Write libapp.so as STORED (uncompressed) at arm64-v8a
+                              new_info = zipfile.ZipInfo("lib/arm64-v8a/libapp.so")
+                              new_info.compress_type = zipfile.ZIP_STORED
+                              zout.writestr(new_info, libapp_data)
+                          else:
+                              # Preserve everything else as-is
+                              zout.writestr(item, data)
+
+                  # If libapp was at a different path, make sure arm64-v8a entry exists
+                  if libapp_entry != "lib/arm64-v8a/libapp.so":
+                      with zipfile.ZipFile(dst, "a", allowZip64=True) as zout:
+                          existing = zout.namelist()
+                          if "lib/arm64-v8a/libapp.so" not in existing:
+                              new_info = zipfile.ZipInfo("lib/arm64-v8a/libapp.so")
+                              new_info.compress_type = zipfile.ZIP_STORED
+                              zout.writestr(new_info, libapp_data)
+
+                  print("Preprocessing complete.")
+                  print(f"  Original size : {os.path.getsize(src):,} bytes")
+                  print(f"  Fixed size    : {os.path.getsize(dst):,} bytes")
+
+          PYEOF
+
       - name: Run reFlutter
         run: |
           echo "Running reFlutter — detecting Flutter snapshot hash and patching engine..."
-          echo "" | reflutter input.apk || reflutter input.apk || true
+          echo "" | reflutter input_fixed.apk || reflutter input_fixed.apk || true
           if [ -f "release.RE.apk" ]; then
             echo "Patch applied successfully: $(du -sh release.RE.apk | cut -f1)"
           else
@@ -56,7 +136,7 @@ jobs:
           import re, zipfile
           snap_hash = "unknown"
           try:
-              with zipfile.ZipFile("input.apk") as zf:
+              with zipfile.ZipFile("input_fixed.apk") as zf:
                   for name in zf.namelist():
                       if name.endswith("v8a/libapp.so") or name.endswith("v7a/libapp.so"):
                           data = zf.read(name).decode("latin-1", errors="ignore")
