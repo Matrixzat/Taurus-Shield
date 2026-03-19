@@ -1,0 +1,113 @@
+name: reFlutter Patcher
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'GitHub release asset ID of the uploaded APK'
+        required: true
+      job_id:
+        description: 'Job correlation ID for artifact naming'
+        required: true
+
+jobs:
+  reflutter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download uploaded APK asset
+        run: |
+          curl -fL \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" \
+            -o input.apk
+          echo "Downloaded: $(ls -lh input.apk)"
+          file input.apk
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install reFlutter
+        run: |
+          pip3 install reflutter==0.8.6
+          echo "reFlutter installed"
+
+      - name: Run reFlutter
+        run: |
+          echo "Running reFlutter — detecting Flutter snapshot hash and patching engine..."
+          echo "" | reflutter input.apk || reflutter input.apk || true
+          if [ -f "release.RE.apk" ]; then
+            echo "Patch applied successfully: $(du -sh release.RE.apk | cut -f1)"
+          else
+            echo "release.RE.apk not found — listing directory:"
+            ls -lh
+            exit 1
+          fi
+
+      - name: Extract snapshot hash
+        run: |
+          python3 - << 'PYEOF'
+          import re, zipfile
+          snap_hash = "unknown"
+          try:
+              with zipfile.ZipFile("input.apk") as zf:
+                  for name in zf.namelist():
+                      if name.endswith("v8a/libapp.so") or name.endswith("v7a/libapp.so"):
+                          data = zf.read(name).decode("latin-1", errors="ignore")
+                          matches = re.findall(r"([a-f0-9]{32})", data)
+                          if matches:
+                              snap_hash = matches[0]
+                              break
+          except Exception as e:
+              print(f"Hash extraction warning: {e}")
+          print(f"Snapshot Hash: {snap_hash}")
+          with open("snap_hash.txt", "w") as f:
+              f.write(snap_hash)
+          PYEOF
+
+      - name: Collect output
+        run: |
+          mkdir -p output_pkg
+          cp release.RE.apk output_pkg/reflutter_patched.apk
+          HASH=$(cat snap_hash.txt 2>/dev/null || echo "unknown")
+          {
+            echo "Tool          : reFlutter"
+            echo "Snapshot Hash : $HASH"
+            echo "Signed        : No (unsigned — install via adb or trusted source)"
+            echo ""
+            echo "NEXT STEPS:"
+            echo "1. Transfer reflutter_patched.apk to your device"
+            echo "2. Install:  adb install reflutter_patched.apk"
+            echo "   (Uninstall the original app first if already installed)"
+            echo "3. Set up your proxy tool (HTTP Toolkit, mitmproxy, Burp, etc.)"
+            echo "   on the same network as your device"
+            echo "4. Route device traffic through the proxy:"
+            echo "   - System proxy:  Settings → WiFi → Proxy → Manual"
+            echo "   - Or use HTTP Toolkit / ProxyDroid for transparent capture"
+            echo "5. Launch the patched app — SSL pinning is bypassed"
+            echo "6. Retrieve the Dart dump:"
+            echo "   adb shell cat /data/data/<PACKAGE>/dump.dart > dump.dart"
+          } > output_pkg/reflutter_info.txt
+          echo "Output ready"
+          ls -lh output_pkg/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reflutter-${{ github.event.inputs.job_id }}
+          path: output_pkg/
+          retention-days: 1
+
+      - name: Delete uploaded asset
+        if: always()
+        run: |
+          curl -s -X DELETE \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" \
+            || true
