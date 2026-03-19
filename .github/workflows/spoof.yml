@@ -21,16 +21,18 @@ jobs:
   spoof:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write
 
     steps:
       - name: Download uploaded APK asset
         run: |
-          curl -sL \
-            -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
+          curl -fL \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" \
             -o input.apk
-          echo "APK size: $(du -sh input.apk | cut -f1)"
+          echo "Downloaded: $(ls -lh input.apk)"
           file input.apk
 
       - name: Set up Java 17
@@ -202,6 +204,6 @@ jobs:
         if: always()
         run: |
           curl -s -X DELETE \
-            -H "Authorization: token ${{ secrets.GH_TOKEN }}" \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" \
             || true
