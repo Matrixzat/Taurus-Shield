@@ -28,6 +28,11 @@ jobs:
             -o project.zip
           echo "Downloaded: $(ls -lh project.zip)"
           unzip -q project.zip -d project/
+          curl -fsSL -X DELETE \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" || true
+          echo "Asset deleted from release immediately after extraction"
+          rm -f project.zip
           echo "Contents:"
           ls project/
 
@@ -74,9 +79,3 @@ jobs:
           path: ${{ steps.locate.outputs.flutter_root }}/build/app/outputs/flutter-apk/app-release.apk
           retention-days: 1
 
-      - name: Delete input ZIP asset
-        if: always()
-        run: |
-          curl -fsSL -X DELETE \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" || true
