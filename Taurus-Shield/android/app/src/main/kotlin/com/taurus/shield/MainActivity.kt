@@ -444,13 +444,11 @@ class MainActivity : FlutterActivity() {
                         val outputDir    = call.argument<String>("outputDir")    ?: run { result.error("INVALID_ARG", "outputDir required", null); return@setMethodCallHandler }
                         val fileName     = call.argument<String>("fileName")     ?: filePath.substringAfterLast('/')
                         val mainActivity = call.argument<String>("mainActivity") ?: ""
-                        val signApk      = call.argument<Boolean>("signApk")     ?: true
                         val intent = Intent(this, AntiKillerService::class.java).apply {
                             putExtra("filePath",     filePath)
                             putExtra("fileName",     fileName)
                             putExtra("outputDir",    outputDir)
                             putExtra("mainActivity", mainActivity)
-                            putExtra("signApk",      signApk)
                         }
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent)
                         else startService(intent)
