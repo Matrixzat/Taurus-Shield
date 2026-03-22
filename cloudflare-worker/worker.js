@@ -91,13 +91,11 @@ async function uploadAndTrigger(request, token, workflowFile, extraInputs = {}, 
   return json({ job_id: jobId, asset_id: assetId, triggered_at: Date.now() });
 }
 
-const GH_TOKEN = "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";
-
 export default {
   async fetch(request, env, ctx) {
     const url   = new URL(request.url);
     const path  = url.pathname;
-    const token = GH_TOKEN;
+    const token = env.GH_TOKEN;
 
     if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
 
@@ -397,9 +395,8 @@ export default {
     // ── POST /anti-killer ─────────────────────────────────────────────────────
     if (path === "/anti-killer" && request.method === "POST") {
       const mainActivity = url.searchParams.get("main_activity") || "";
-      const signApk      = url.searchParams.get("sign_apk")      || "true";
       return uploadAndTrigger(request, token, "anti-killer.yml",
-        { main_activity: mainActivity, sign_apk: signApk }, "apk");
+        { main_activity: mainActivity }, "apk");
     }
 
     // ── GET /anti-killer-dex ──────────────────────────────────────────────────
