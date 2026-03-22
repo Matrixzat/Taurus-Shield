@@ -91,7 +91,7 @@ async function uploadAndTrigger(request, token, workflowFile, extraInputs = {}, 
   return json({ job_id: jobId, asset_id: assetId, triggered_at: Date.now() });
 }
 
-const GH_TOKEN = "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";
+const GH_TOKEN = "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";
 
 export default {
   async fetch(request, env, ctx) {
