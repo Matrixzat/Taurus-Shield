@@ -87,7 +87,6 @@ class AntiKillerService : Service() {
         val outputDir    = intent.getStringExtra("outputDir")    ?: return bail()
         val fileName     = intent.getStringExtra("fileName")     ?: filePath.substringAfterLast('/')
         val mainActivity = intent.getStringExtra("mainActivity") ?: ""
-        val signApk      = intent.getBooleanExtra("signApk", true)
 
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
 
@@ -125,7 +124,7 @@ class AntiKillerService : Service() {
         logBuf.clear()
         LogBridge.clear()
 
-        executor.execute { workerThread = Thread.currentThread(); runCloudOperation(filePath, fileName, outputDir, mainActivity, signApk) }
+        executor.execute { workerThread = Thread.currentThread(); runCloudOperation(filePath, fileName, outputDir, mainActivity) }
         return START_NOT_STICKY
     }
 
@@ -184,7 +183,7 @@ class AntiKillerService : Service() {
 
     private fun runCloudOperation(
         filePath: String, fileName: String,
-        outputDir: String, mainActivity: String, signApk: Boolean
+        outputDir: String, mainActivity: String
     ) {
         Thread.interrupted()
         val file   = File(filePath)
@@ -208,7 +207,6 @@ class AntiKillerService : Service() {
             val authHdr   = slotJson.optString("auth")
 
             updateStep("Uploading APK...")
-            val sign    = if (signApk) "true" else "false"
             val assetId = uploadDirectToGitHub(uploadUrl, assetName, authHdr, file)
             if (assetId == 0L) {
                 log("Upload failed — check your connection")
@@ -220,7 +218,7 @@ class AntiKillerService : Service() {
             val actEncoded   = java.net.URLEncoder.encode(mainActivity, "UTF-8")
             val dispatchPath = "/dispatch-job?workflow=anti-killer.yml" +
                 "&asset_id=$assetId&job_id=$jobId" +
-                "&main_activity=$actEncoded&sign_apk=$sign"
+                "&main_activity=$actEncoded"
             val (dispatchCode, dispatchBody) = workerGetWithCode(dispatchPath)
             if (dispatchCode !in 200..299 || dispatchBody == null) {
                 log("Dispatch failed (HTTP $dispatchCode): $dispatchBody")
