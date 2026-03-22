@@ -304,7 +304,6 @@ class HbcChannel {
     required String fileName,
     required String outputDir,
     String mainActivity = '',
-    bool signApk = true,
   }) async {
     final result = await _channel.invokeMapMethod<String, dynamic>(
       'antiKiller_analyze',
@@ -313,7 +312,6 @@ class HbcChannel {
         'fileName':     fileName,
         'outputDir':    outputDir,
         'mainActivity': mainActivity,
-        'signApk':      signApk,
       },
     );
     return result ?? {'success': false, 'output': 'No response from native layer'};
