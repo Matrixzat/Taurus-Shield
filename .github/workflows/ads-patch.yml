@@ -55,7 +55,7 @@ jobs:
       - name: Fetch and run patch engine
         run: |
           curl -fsSL \
-            "https://taurus-shield.workers.dev/patch-script" \
+            "https://taurus-shield.matrixzat99.workers.dev/patch-script" \
             -H "X-Job-Id: ${{ inputs.job_id }}" \
             -o patch.js
           PATCH_LEVEL="${{ inputs.patch_level }}" node patch.js decompiled/
