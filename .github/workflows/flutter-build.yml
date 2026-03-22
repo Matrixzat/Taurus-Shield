@@ -98,7 +98,7 @@ jobs:
         with:
           name: flutter-apk-${{ github.event.inputs.job_id }}
           path: ${{ steps.locate.outputs.flutter_root }}/build/app/outputs/flutter-apk/app-release.apk
-          retention-days: 7
+          retention-days: 1
 
       - name: Delete input ZIP asset
         if: always()
