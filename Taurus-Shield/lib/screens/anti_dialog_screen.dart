@@ -29,7 +29,6 @@ class _AntiDialogScreenState extends State<AntiDialogScreen>
   bool    _autoScroll       = true;
   String? _fileStatus;
   bool    _fileValid        = false;
-  bool    _signApk          = true;
   String  _mainActivity     = '';
   StreamSubscription<String>? _streamSub;
   final Stopwatch _stopwatch  = Stopwatch();
@@ -305,7 +304,6 @@ class _AntiDialogScreenState extends State<AntiDialogScreen>
         fileName:     _selectedFileName ?? _selectedFilePath!.split('/').last,
         outputDir:    outputDir,
         mainActivity: _mainActivity.trim(),
-        signApk:      _signApk,
       );
 
       if (result['started'] != true) {
@@ -676,22 +674,14 @@ class _AntiDialogScreenState extends State<AntiDialogScreen>
         border: Border.all(color: const Color(0xFF1e1e38)),
       ),
       child: Row(children: [
-        Icon(Icons.verified_user_rounded,
-            color: _signApk ? const Color(0xFF22c55e) : const Color(0xFF4a4a6a), size: 18),
+        const Icon(Icons.verified_user_rounded, color: Color(0xFF22c55e), size: 18),
         const SizedBox(width: 10),
         Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Text('Sign APK', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600)),
-          Text('Debug-sign the patched APK for direct install',
+          const Text('Auto-signed', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.w600)),
+          Text('APK is automatically signed with the release keystore',
               style: TextStyle(color: Colors.white.withOpacity(0.45), fontSize: 10.5)),
         ])),
-        Switch(
-          value: _signApk,
-          onChanged: _isProcessing ? null : (v) => setState(() => _signApk = v),
-          activeColor: const Color(0xFF22c55e),
-          activeTrackColor: const Color(0xFF22c55e).withOpacity(0.3),
-          inactiveTrackColor: const Color(0xFF1e1e38),
-          inactiveThumbColor: const Color(0xFF4a4a6a),
-        ),
+        const Icon(Icons.lock_rounded, color: Color(0xFF22c55e), size: 18),
       ]),
     );
   }
