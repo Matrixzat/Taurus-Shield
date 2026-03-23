@@ -76,7 +76,7 @@ jobs:
             echo "Cache miss — building baksmali from source (v${BAKSMALI_VERSION})..."
             git clone --depth 1 --branch "v${BAKSMALI_VERSION}" https://github.com/JesusFreke/smali.git /tmp/smali-src
             cd /tmp/smali-src
-            ./gradlew baksmali:shadowJar --no-daemon -q 2>&1 | tail -5
+            ./gradlew :baksmali:fatJar --no-daemon -q 2>&1 | tail -5
             FAT_JAR=$(find baksmali/build/libs -name "baksmali-*-fat.jar" | head -1)
             [ -z "$FAT_JAR" ] && FAT_JAR=$(find baksmali/build/libs -name "*.jar" ! -name "*sources*" ! -name "*javadoc*" | head -1)
             echo "Built: $FAT_JAR ($(du -sh $FAT_JAR | cut -f1))"
