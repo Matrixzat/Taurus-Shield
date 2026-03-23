@@ -76,7 +76,9 @@ jobs:
             echo "Cache miss — building baksmali from source (v${BAKSMALI_VERSION})..."
             git clone --depth 1 --branch "v${BAKSMALI_VERSION}" https://github.com/JesusFreke/smali.git /tmp/smali-src
             cd /tmp/smali-src
-            ./gradlew :baksmali:fatJar --no-daemon -q 2>&1 | tail -5
+            sed -i 's|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-7.6.4-all.zip|' gradle/wrapper/gradle-wrapper.properties
+            echo "Gradle wrapper → 7.6.4 (Java 17 compatible)"
+            ./gradlew :baksmali:fatJar --no-daemon 2>&1 | tail -10
             FAT_JAR=$(find baksmali/build/libs -name "baksmali-*-fat.jar" | head -1)
             [ -z "$FAT_JAR" ] && FAT_JAR=$(find baksmali/build/libs -name "*.jar" ! -name "*sources*" ! -name "*javadoc*" | head -1)
             echo "Built: $FAT_JAR ($(du -sh $FAT_JAR | cut -f1))"
