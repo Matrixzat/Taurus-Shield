@@ -230,13 +230,13 @@ jobs:
           } catch(e) {}
           console.log('DEX count:', dexCount);
 
-          // Write encrypted dat files
-          fs.mkdirSync('hash_assets', { recursive: true });
-          fs.writeFileSync('hash_assets/ak_mh.dat', encrypt(manifestHash));
-          fs.writeFileSync('hash_assets/ak_dc.dat', encrypt(dexCount.toString()));
+          // Write encrypted dat files into assets/ folder
+          fs.mkdirSync('hash_assets/assets', { recursive: true });
+          fs.writeFileSync('hash_assets/assets/ak_mh.dat', encrypt(manifestHash));
+          fs.writeFileSync('hash_assets/assets/ak_dc.dat', encrypt(dexCount.toString()));
 
-          // Inject into APK
-          execSync('cd hash_assets && zip -j "../' + APK + '" ak_mh.dat ak_dc.dat');
+          // Inject into APK preserving assets/ path
+          execSync('cd hash_assets && zip -r "../' + APK + '" assets/');
           console.log('Integrity hashes injected successfully.');
           NODE
 
