@@ -53,11 +53,8 @@ jobs:
           echo "APKTool URL: $APKTOOL_URL"
           curl -fsSL "$APKTOOL_URL" -o apktool.jar
 
-          echo "Fetching latest baksmali release..."
-          BAKSMALI_URL=$(curl -fsSL https://api.github.com/repos/JesusFreke/smali/releases/latest \
-            | python3 -c "import sys,json; r=json.load(sys.stdin); print(next(a['browser_download_url'] for a in r['assets'] if 'baksmali' in a['name'].lower() and a['name'].endswith('.jar')))")
-          echo "baksmali URL: $BAKSMALI_URL"
-          curl -fsSL "$BAKSMALI_URL" -o baksmali.jar
+          echo "Downloading baksmali from Maven Central..."
+          curl -fsSL "https://repo1.maven.org/maven2/org/smali/baksmali/2.5.2/baksmali-2.5.2.jar" -o baksmali.jar
 
           echo "APKTool: $(du -sh apktool.jar) | baksmali: $(du -sh baksmali.jar)"
           echo "Tools ready"
