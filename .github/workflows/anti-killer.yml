@@ -166,7 +166,7 @@ jobs:
           fi
           (cd "$DPT_DIR" && java -jar dpt.jar -v)
 
-      - name: Run DPT-Shell protection
+      - name: Run Matrix Hook
         run: |
           WS="$GITHUB_WORKSPACE"
           INPUT_APK="$WS/output/patched.apk"
