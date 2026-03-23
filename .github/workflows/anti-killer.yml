@@ -221,12 +221,12 @@ jobs:
           } catch(e) { console.error('Hash error:', e.message); }
           console.log('Manifest hash:', manifestHash);
 
-          // DEX count inside the protected APK
+          // DEX count — count ALL .dex entries (matches original AdmZip logic)
           let dexCount = 1;
           try {
-            const listing = execSync('unzip -l "' + APK + '"').toString();
-            const matches = listing.match(/classes\d*\.dex/g) || [];
-            dexCount = matches.length || 1;
+            const lines = execSync('unzip -l "' + APK + '"').toString().split('\n');
+            const dexEntries = lines.filter(l => l.trim().match(/\S+\.dex$/));
+            dexCount = dexEntries.length || 1;
           } catch(e) {}
           console.log('DEX count:', dexCount);
 
