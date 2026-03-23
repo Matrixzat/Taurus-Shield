@@ -73,17 +73,24 @@ jobs:
               -o baksmali.jar
             echo "Downloaded: $(du -sh baksmali.jar)"
           else
-            echo "Cache miss — building baksmali from source (v${BAKSMALI_VERSION})..."
-            git clone --depth 1 --branch "v${BAKSMALI_VERSION}" https://github.com/JesusFreke/smali.git /tmp/smali-src
-            cd /tmp/smali-src
-            sed -i 's|distributionUrl=.*|distributionUrl=https\\://services.gradle.org/distributions/gradle-7.6.4-all.zip|' gradle/wrapper/gradle-wrapper.properties
-            echo "Gradle wrapper → 7.6.4 (Java 17 compatible)"
-            ./gradlew :baksmali:fatJar --no-daemon 2>&1 | tail -10
-            FAT_JAR=$(find baksmali/build/libs -name "baksmali-*-fat.jar" | head -1)
-            [ -z "$FAT_JAR" ] && FAT_JAR=$(find baksmali/build/libs -name "*.jar" ! -name "*sources*" ! -name "*javadoc*" | head -1)
-            echo "Built: $FAT_JAR ($(du -sh $FAT_JAR | cut -f1))"
-            cp "$FAT_JAR" $GITHUB_WORKSPACE/baksmali.jar
+            echo "Cache miss — assembling baksmali fat jar from Maven Central..."
+            MAVEN="https://repo1.maven.org/maven2"
+            mkdir -p /tmp/bak-jars /tmp/bak-merged
+            for JAR in \
+              "org/smali/baksmali/2.5.2/baksmali-2.5.2.jar" \
+              "org/smali/util/2.5.2/util-2.5.2.jar" \
+              "org/smali/dexlib2/2.5.2/dexlib2-2.5.2.jar" \
+              "com/google/guava/guava/27.1-android/guava-27.1-android.jar" \
+              "com/beust/jcommander/1.64/jcommander-1.64.jar"; do
+              curl -fsSL "${MAVEN}/${JAR}" -o "/tmp/bak-jars/$(basename $JAR)"
+            done
+            echo "Downloaded: $(du -sh /tmp/bak-jars)"
+            cd /tmp/bak-merged
+            for j in /tmp/bak-jars/*.jar; do jar xf "$j"; done
+            printf "Main-Class: org.jf.baksmali.Main\n\n" > /tmp/MANIFEST.MF
+            jar cfm $GITHUB_WORKSPACE/baksmali.jar /tmp/MANIFEST.MF -C /tmp/bak-merged .
             cd $GITHUB_WORKSPACE
+            echo "Assembled: $(du -sh baksmali.jar)"
 
             echo "Uploading baksmali to tools-cache for future runs..."
             RELEASE_ID=$(echo "$CACHE_RELEASE" | python3 -c \
