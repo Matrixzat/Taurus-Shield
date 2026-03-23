@@ -53,17 +53,56 @@ jobs:
           echo "APKTool URL: $APKTOOL_URL"
           curl -fsSL "$APKTOOL_URL" -o apktool.jar
 
-          echo "Building baksmali from source (v2.5.2)..."
-          git clone --depth 1 --branch v2.5.2 https://github.com/JesusFreke/smali.git /tmp/smali-src
-          cd /tmp/smali-src
-          ./gradlew baksmali:shadowJar --no-daemon -q 2>&1 | tail -5
-          FAT_JAR=$(find baksmali/build/libs -name "baksmali-*-fat.jar" | head -1)
-          if [ -z "$FAT_JAR" ]; then
-            FAT_JAR=$(find baksmali/build/libs -name "*.jar" ! -name "*sources*" ! -name "*javadoc*" | head -1)
+          BAKSMALI_VERSION="2.5.2"
+          CACHE_TAG="tools-cache"
+          ASSET_NAME="baksmali-${BAKSMALI_VERSION}-fat.jar"
+
+          echo "Checking tools-cache release for baksmali..."
+          CACHE_RELEASE=$(curl -fsSL \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/${CACHE_TAG}" 2>/dev/null || echo "{}")
+          ASSET_ID=$(echo "$CACHE_RELEASE" | python3 -c \
+            "import sys,json; r=json.load(sys.stdin); print(next((str(a['id']) for a in r.get('assets',[]) if a['name']=='${ASSET_NAME}'), ''))" 2>/dev/null || echo "")
+
+          if [ -n "$ASSET_ID" ]; then
+            echo "Cache hit — downloading baksmali from tools-cache..."
+            curl -fsSL \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/octet-stream" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/assets/${ASSET_ID}" \
+              -o baksmali.jar
+            echo "Downloaded: $(du -sh baksmali.jar)"
+          else
+            echo "Cache miss — building baksmali from source (v${BAKSMALI_VERSION})..."
+            git clone --depth 1 --branch "v${BAKSMALI_VERSION}" https://github.com/JesusFreke/smali.git /tmp/smali-src
+            cd /tmp/smali-src
+            ./gradlew baksmali:shadowJar --no-daemon -q 2>&1 | tail -5
+            FAT_JAR=$(find baksmali/build/libs -name "baksmali-*-fat.jar" | head -1)
+            [ -z "$FAT_JAR" ] && FAT_JAR=$(find baksmali/build/libs -name "*.jar" ! -name "*sources*" ! -name "*javadoc*" | head -1)
+            echo "Built: $FAT_JAR ($(du -sh $FAT_JAR | cut -f1))"
+            cp "$FAT_JAR" $GITHUB_WORKSPACE/baksmali.jar
+            cd $GITHUB_WORKSPACE
+
+            echo "Uploading baksmali to tools-cache for future runs..."
+            RELEASE_ID=$(echo "$CACHE_RELEASE" | python3 -c \
+              "import sys,json; r=json.load(sys.stdin); print(r.get('id',''))" 2>/dev/null || echo "")
+            if [ -z "$RELEASE_ID" ]; then
+              echo "Creating tools-cache release..."
+              RELEASE_ID=$(curl -fsSL -X POST \
+                -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                -H "Content-Type: application/json" \
+                "https://api.github.com/repos/${{ github.repository }}/releases" \
+                -d "{\"tag_name\":\"${CACHE_TAG}\",\"name\":\"Tools Cache\",\"body\":\"Cached build tools. Do not delete — used by workflows.\",\"prerelease\":true}" \
+                | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+              echo "Created release ID: $RELEASE_ID"
+            fi
+            curl -fsSL -X POST \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: application/java-archive" \
+              "https://uploads.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}/assets?name=${ASSET_NAME}" \
+              --data-binary @baksmali.jar > /dev/null
+            echo "Cached for future runs"
           fi
-          echo "Built jar: $FAT_JAR ($(du -sh $FAT_JAR | cut -f1))"
-          cp "$FAT_JAR" $GITHUB_WORKSPACE/baksmali.jar
-          cd $GITHUB_WORKSPACE
 
           echo "APKTool: $(du -sh apktool.jar) | baksmali: $(du -sh baksmali.jar)"
           echo "Tools ready"
