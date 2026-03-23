@@ -47,12 +47,19 @@ jobs:
 
       - name: Download APKTool + baksmali
         run: |
-          curl -fsSL \
-            "https://github.com/iBotPeaches/Apktool/releases/download/v2.9.3/apktool_2.9.3.jar" \
-            -o apktool.jar
-          curl -fsSL \
-            "https://github.com/JesusFreke/smali/releases/download/v2.5.2/baksmali-2.5.2.jar" \
-            -o baksmali.jar
+          echo "Fetching latest APKTool release..."
+          APKTOOL_URL=$(curl -fsSL https://api.github.com/repos/iBotPeaches/Apktool/releases/latest \
+            | python3 -c "import sys,json; r=json.load(sys.stdin); print(next(a['browser_download_url'] for a in r['assets'] if 'apktool' in a['name'].lower() and a['name'].endswith('.jar')))")
+          echo "APKTool URL: $APKTOOL_URL"
+          curl -fsSL "$APKTOOL_URL" -o apktool.jar
+
+          echo "Fetching latest baksmali release..."
+          BAKSMALI_URL=$(curl -fsSL https://api.github.com/repos/JesusFreke/smali/releases/latest \
+            | python3 -c "import sys,json; r=json.load(sys.stdin); print(next(a['browser_download_url'] for a in r['assets'] if 'baksmali' in a['name'].lower() and a['name'].endswith('.jar')))")
+          echo "baksmali URL: $BAKSMALI_URL"
+          curl -fsSL "$BAKSMALI_URL" -o baksmali.jar
+
+          echo "APKTool: $(du -sh apktool.jar) | baksmali: $(du -sh baksmali.jar)"
           echo "Tools ready"
 
       - name: Decompile APK
