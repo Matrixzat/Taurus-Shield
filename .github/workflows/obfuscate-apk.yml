@@ -50,19 +50,35 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Cache apktool
+        uses: actions/cache@v4
+        id: cache-apktool
+        with:
+          path: /usr/local/bin/apktool.jar
+          key: apktool-2.10.0
+
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        id: cache-apt
+        with:
+          path: /var/cache/apt/archives
+          key: apt-obfuscate-${{ runner.os }}-zipalign-apksigner
+
       - name: Install tools
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq zipalign apksigner python3 python3-pip
-          pip3 install -q androguard 2>/dev/null || true
           APKTOOL_VER="2.10.0"
-          curl -fsSL -o /usr/local/bin/apktool.jar \
-            "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VER}/apktool_${APKTOOL_VER}.jar"
-          curl -fsSL -o /usr/local/bin/apktool \
-            "https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool"
-          chmod +x /usr/local/bin/apktool
-          echo '#!/bin/bash' > /tmp/apktool_wrap
-          echo 'exec java -jar /usr/local/bin/apktool.jar "$@"' >> /tmp/apktool_wrap
+          if [ "${{ steps.cache-apktool.outputs.cache-hit }}" != "true" ]; then
+            curl -fsSL -o /usr/local/bin/apktool.jar \
+              "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VER}/apktool_${APKTOOL_VER}.jar"
+          fi
+          if [ "${{ steps.cache-apt.outputs.cache-hit }}" != "true" ]; then
+            sudo apt-get update -qq
+          fi
+          sudo apt-get install -y -qq --no-upgrade zipalign apksigner python3
+          cat > /tmp/apktool_wrap << 'EOF'
+          #!/bin/bash
+          exec java -jar /usr/local/bin/apktool.jar "$@"
+          EOF
           chmod +x /tmp/apktool_wrap
           sudo mv /tmp/apktool_wrap /usr/local/bin/apktool
           apktool --version
