@@ -9,6 +9,10 @@ on:
       job_id:
         description: 'Job correlation ID for artifact naming'
         required: true
+      classes_filter:
+        description: 'JSON array of class paths to obfuscate (empty = obfuscate all)'
+        required: false
+        default: ''
 
 jobs:
   obfuscate:
@@ -71,9 +75,22 @@ jobs:
       - name: Apply Chinese obfuscation
         run: |
           cat > /tmp/obfuscate.py << 'PYEOF'
-          import os, re, random, sys, hashlib
+          import os, re, random, sys, hashlib, json
 
           ROOT = 'decompiled'
+
+          # ── Classes filter (manual mode) ─────────────────────────────────────
+          CLASSES_FILTER_RAW = os.environ.get('CLASSES_FILTER', '').strip()
+          CLASSES_FILTER = set()
+          if CLASSES_FILTER_RAW:
+              try:
+                  parsed = json.loads(CLASSES_FILTER_RAW)
+                  CLASSES_FILTER = set(parsed)
+                  print(f'[+] Manual mode: will obfuscate {len(CLASSES_FILTER)} specific classes')
+              except Exception as e:
+                  print(f'[!] Could not parse classes_filter ({e}), falling back to full mode')
+          else:
+              print(f'[+] Full mode: obfuscating all classes')
           SMALI_DIRS = [d for d in os.listdir(ROOT) if d.startswith('smali')]
 
           # CJK Unified Ideographs range (4E00-9FFF) — 20,902 chars
@@ -139,6 +156,9 @@ jobs:
                   continue
               cls = m.group(1)
               if should_skip_class(cls):
+                  continue
+              # Manual mode: only process selected classes
+              if CLASSES_FILTER and cls[1:-1] not in CLASSES_FILTER:
                   continue
               # Extract package and class name
               slash_idx = cls.rfind('/')
@@ -304,7 +324,7 @@ jobs:
 
           print(f'[+] Done. Renamed {len(class_map)} classes, encrypted {str_count} strings.')
           PYEOF
-          python3 /tmp/obfuscate.py
+          CLASSES_FILTER="${{ github.event.inputs.classes_filter }}" python3 /tmp/obfuscate.py
 
       - name: Rebuild APK
         run: |
