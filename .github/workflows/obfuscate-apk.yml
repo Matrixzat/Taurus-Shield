@@ -327,11 +327,17 @@ jobs:
                                   reg_match = re.match(r'\s*const-string(?:/jumbo)?\s+(\w+),', line)
                                   if reg_match:
                                       reg = reg_match.group(1)
+                                      # invoke-static only works for v0-v15;
+                                      # use invoke-static/range for v16+ to avoid register errors
+                                      reg_num = int(reg[1:]) if reg[1:].isdigit() else 999
                                       dec_cls = class_map.get(DECRYPT_CLASS, DECRYPT_CLASS)
+                                      if reg_num <= 15:
+                                          invoke = f'    invoke-static {{{reg}}}, {dec_cls}->{DECRYPT_METHOD}(Ljava/lang/String;)Ljava/lang/String;\n'
+                                      else:
+                                          invoke = f'    invoke-static/range {{{reg} .. {reg}}}, {dec_cls}->{DECRYPT_METHOD}(Ljava/lang/String;)Ljava/lang/String;\n'
                                       line = (f'{prefix}"{enc}"{suffix}\n'
-                                              f'    invoke-static {{{reg}}}, {dec_cls}->{DECRYPT_METHOD}'
-                                              f'(Ljava/lang/String;)Ljava/lang/String;\n'
-                                              f'    move-result-object {reg}\n')
+                                              + invoke
+                                              + f'    move-result-object {reg}\n')
                                       str_count += 1
                               except Exception:
                                   pass
