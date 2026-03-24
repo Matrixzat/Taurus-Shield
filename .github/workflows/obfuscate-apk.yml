@@ -1,0 +1,342 @@
+name: APK Obfuscator (Chinese + String Encryption)
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'GitHub release asset ID of the uploaded APK ZIP'
+        required: true
+      job_id:
+        description: 'Job correlation ID for artifact naming'
+        required: true
+
+jobs:
+  obfuscate:
+    name: Chinese Obfuscation
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download APK ZIP from release
+        run: |
+          curl -fL \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" \
+            -o input.zip
+          echo "Downloaded: $(ls -lh input.zip)"
+          unzip -q input.zip -d extracted/
+          curl -fsSL -X DELETE \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" || true
+          rm -f input.zip
+          APK_FILE=$(find extracted/ -name "*.apk" | head -1)
+          if [ -z "$APK_FILE" ]; then
+            echo "ERROR: No APK found in ZIP"
+            exit 1
+          fi
+          cp "$APK_FILE" input.apk
+          echo "APK: $APK_FILE ($(ls -lh input.apk | awk '{print $5}'))"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zipalign apksigner python3 python3-pip
+          pip3 install -q androguard 2>/dev/null || true
+          APKTOOL_VER="2.10.0"
+          curl -fsSL -o /usr/local/bin/apktool.jar \
+            "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VER}/apktool_${APKTOOL_VER}.jar"
+          curl -fsSL -o /usr/local/bin/apktool \
+            "https://raw.githubusercontent.com/iBotPeaches/Apktool/master/scripts/linux/apktool"
+          chmod +x /usr/local/bin/apktool
+          echo '#!/bin/bash' > /tmp/apktool_wrap
+          echo 'exec java -jar /usr/local/bin/apktool.jar "$@"' >> /tmp/apktool_wrap
+          chmod +x /tmp/apktool_wrap
+          sudo mv /tmp/apktool_wrap /usr/local/bin/apktool
+          apktool --version
+
+      - name: Decompile APK
+        run: |
+          apktool d input.apk -o decompiled/ --no-res -f
+          echo "Smali dirs: $(ls decompiled/ | grep smali)"
+
+      - name: Apply Chinese obfuscation
+        run: |
+          cat > /tmp/obfuscate.py << 'PYEOF'
+          import os, re, random, sys, hashlib
+
+          ROOT = 'decompiled'
+          SMALI_DIRS = [d for d in os.listdir(ROOT) if d.startswith('smali')]
+
+          # CJK Unified Ideographs range (4E00-9FFF) — 20,902 chars
+          CJK_START = 0x4E00
+          CJK_END   = 0x9FFF
+          CJK_RANGE = list(range(CJK_START, CJK_END + 1))
+          random.seed(42)
+
+          def rand_cjk(length=3):
+              return ''.join(chr(random.choice(CJK_RANGE)) for _ in range(length))
+
+          def collect_smali_files():
+              files = []
+              for sd in SMALI_DIRS:
+                  sd_path = os.path.join(ROOT, sd)
+                  for dirpath, _, fnames in os.walk(sd_path):
+                      for f in fnames:
+                          if f.endswith('.smali'):
+                              files.append(os.path.join(dirpath, f))
+              return files
+
+          print(f'[+] Scanning smali files...')
+          smali_files = collect_smali_files()
+          print(f'[+] Found {len(smali_files)} smali files')
+
+          # ── Phase 1: collect class names to rename ──────────────────────────
+          class_map = {}   # old_class_path -> new_class_path
+          method_map = {}  # (class, method_sig) -> new_name
+          field_map  = {}  # (class, field_sig)  -> new_name
+
+          SKIP_PREFIXES = [
+              'Landroid/', 'Ljava/', 'Ljavax/', 'Ldalvik/', 'Lcom/google/android/',
+              'Lcom/android/', 'Landroidx/', 'Lkotlin/', 'Lkotlinx/',
+              'Lcom/squareup/', 'Lokhttp3/', 'Lretrofit2/', 'Lrx/',
+          ]
+          SKIP_CLASSES = {'Landroid', 'Ljava', 'Lkotlin'}
+
+          def should_skip_class(cls):
+              for p in SKIP_PREFIXES:
+                  if cls.startswith(p):
+                      return True
+              return False
+
+          KEEP_METHODS = {
+              '<init>', '<clinit>', 'onClick', 'onCreate', 'onStart', 'onStop',
+              'onResume', 'onPause', 'onDestroy', 'onCreateView', 'onViewCreated',
+              'onAttach', 'onDetach', 'onActivityCreated', 'onSaveInstanceState',
+              'onRestoreInstanceState', 'onRequestPermissionsResult',
+              'onActivityResult', 'onNewIntent', 'onBind', 'onUnbind',
+              'onStartCommand', 'onReceive', 'run', 'call', 'compare',
+              'hashCode', 'equals', 'toString', 'compareTo', 'getClass',
+          }
+
+          print(f'[+] Phase 1: Mapping class names...')
+          for fpath in smali_files:
+              with open(fpath, 'r', encoding='utf-8', errors='replace') as f:
+                  first_line = ''
+                  for line in f:
+                      first_line = line.strip()
+                      break
+              m = re.match(r'^\.class\s+(?:[\w\s]+\s+)?(\S+;)', first_line)
+              if not m:
+                  continue
+              cls = m.group(1)
+              if should_skip_class(cls):
+                  continue
+              # Extract package and class name
+              slash_idx = cls.rfind('/')
+              if slash_idx < 0:
+                  continue
+              pkg  = cls[:slash_idx + 1]   # e.g. Lcom/example/
+              name = cls[slash_idx + 1:-1]  # e.g. MyClass
+              if '$' in name:
+                  # Inner class — rename just the inner part
+                  parts = name.split('$')
+                  new_parts = []
+                  for p in parts:
+                      if p.isdigit() or p == '':
+                          new_parts.append(p)
+                      else:
+                          h = hashlib.md5((cls + p).encode()).hexdigest()[:4]
+                          new_parts.append(rand_cjk(2) + h)
+                  new_name = '$'.join(new_parts)
+              else:
+                  h = hashlib.md5(cls.encode()).hexdigest()[:4]
+                  new_name = rand_cjk(3) + h
+              new_cls = pkg + new_name + ';'
+              class_map[cls] = new_cls
+
+          print(f'[+] Will rename {len(class_map)} classes')
+
+          # ── Phase 2: apply class renaming + method/field renaming + string encryption ──
+          # String encryption: XOR with key 0x5A, encode as hex escape sequence
+          XOR_KEY = 0x5A
+
+          def xor_encrypt(s):
+              return ''.join(f'\\u{(ord(c) ^ XOR_KEY):04X}' for c in s)
+
+          # Smali helper class source — we inject a decryptor
+          DECRYPT_CLASS_NAME_BASE = rand_cjk(3) + 'ff00'
+          DECRYPT_CLASS = f'L{DECRYPT_CLASS_NAME_BASE};'
+          DECRYPT_SMALI_PATH = os.path.join(ROOT, SMALI_DIRS[0], f'{DECRYPT_CLASS_NAME_BASE}.smali')
+          DECRYPT_METHOD = 'a'
+
+          os.makedirs(os.path.dirname(DECRYPT_SMALI_PATH), exist_ok=True)
+
+          decrypt_smali_content = f'''.class public final {DECRYPT_CLASS}
+          .super Ljava/lang/Object;
+
+          .method public static {DECRYPT_METHOD}(Ljava/lang/String;)Ljava/lang/String;
+              .locals 4
+              const/4 v0, 0x5a
+              invoke-virtual {{p0}}, Ljava/lang/String;->toCharArray()[C
+              move-result-object v1
+              array-length v2, v1
+              new-array v3, v2, [C
+              const/4 v2, 0x0
+              :loop
+              array-length v0, v1
+              if-ge v2, v0, :end
+              aget-char v0, v1, v2
+              xor-int/lit8 v0, v0, 0x5a
+              aput-char v0, v3, v2
+              add-int/lit8 v2, v2, 0x1
+              goto :loop
+              :end
+              new-instance v0, Ljava/lang/String;
+              invoke-direct {{v0, v3}}, Ljava/lang/String;-><init>([C)V
+              return-object v0
+          .end method
+          '''
+
+          with open(DECRYPT_SMALI_PATH, 'w', encoding='utf-8') as f:
+              f.write(decrypt_smali_content)
+          print(f'[+] Injected decrypt helper: {DECRYPT_CLASS_NAME_BASE}')
+
+          METHOD_COUNTER = [0]
+          FIELD_COUNTER  = [0]
+
+          def make_method_name(cls, name):
+              if name in KEEP_METHODS:
+                  return name
+              key = cls + '|' + name
+              if key not in method_map:
+                  h = hashlib.md5(key.encode()).hexdigest()[:4]
+                  method_map[key] = rand_cjk(2) + h
+              return method_map[key]
+
+          def make_field_name(cls, name):
+              key = cls + '|' + name
+              if key not in field_map:
+                  h = hashlib.md5(key.encode()).hexdigest()[:4]
+                  field_map[key] = rand_cjk(2) + h
+              return field_map[key]
+
+          STR_PATTERN    = re.compile(r'^(\s*const-string(?:/jumbo)?\s+\w+,\s+)"((?:[^"\\]|\\.)*)"(.*)$')
+          METHOD_PATTERN = re.compile(r'^(\s*\.method\s+(?:[\w\s]+\s+)?)(\w[\w\d$]*)(\(.*\).*)$')
+          FIELD_DEF_PATTERN = re.compile(r'^(\s*\.field\s+(?:[\w\s]+\s+)?)(\w[\w\d$]*)(:[\w\[L;/$]+.*)$')
+
+          print(f'[+] Phase 2: Applying obfuscation...')
+          processed = 0
+          str_count  = 0
+
+          for fpath in smali_files:
+              with open(fpath, 'r', encoding='utf-8', errors='replace') as f:
+                  lines = f.readlines()
+
+              current_class = None
+              for l in lines:
+                  m = re.match(r'^\.class\s+(?:[\w\s]+\s+)?(\S+;)', l.strip())
+                  if m:
+                      current_class = m.group(1)
+                      break
+
+              new_lines = []
+              for line in lines:
+                  # Apply class renames everywhere
+                  for old, new in class_map.items():
+                      if old in line:
+                          line = line.replace(old, new)
+
+                  # Method renaming
+                  if current_class and not should_skip_class(current_class or ''):
+                      mm = METHOD_PATTERN.match(line)
+                      if mm:
+                          prefix, mname, suffix = mm.group(1), mm.group(2), mm.group(3)
+                          new_mname = make_method_name(current_class, mname)
+                          if new_mname != mname:
+                              line = prefix + new_mname + suffix + '\n'
+
+                      fm = FIELD_DEF_PATTERN.match(line)
+                      if fm:
+                          prefix, fname, suffix = fm.group(1), fm.group(2), fm.group(3)
+                          new_fname = make_field_name(current_class, fname)
+                          if new_fname != fname:
+                              line = prefix + new_fname + suffix + '\n'
+
+                  # String literal encryption — skip very short strings and empty
+                  sm = STR_PATTERN.match(line)
+                  if sm:
+                      prefix, val, suffix = sm.group(1), sm.group(2), sm.group(3)
+                      if len(val) >= 4 and len(val) <= 200 and not val.startswith('\\'):
+                          try:
+                              enc = xor_encrypt(val)
+                              # Replace with: const-string vN, "<encrypted>"
+                              # followed by: invoke-static {vN}, Ldecrypt;->a(Ljava/lang/String;)Ljava/lang/String;
+                              # followed by: move-result-object vN
+                              reg_match = re.match(r'\s*const-string(?:/jumbo)?\s+(\w+),', line)
+                              if reg_match:
+                                  reg = reg_match.group(1)
+                                  dec_cls = class_map.get(DECRYPT_CLASS, DECRYPT_CLASS)
+                                  line = (f'{prefix}"{enc}"{suffix}\n'
+                                          f'    invoke-static {{{reg}}}, {dec_cls}->{DECRYPT_METHOD}'
+                                          f'(Ljava/lang/String;)Ljava/lang/String;\n'
+                                          f'    move-result-object {reg}\n')
+                                  str_count += 1
+                          except Exception:
+                              pass
+
+                  new_lines.append(line)
+
+              with open(fpath, 'w', encoding='utf-8') as f:
+                  f.writelines(new_lines)
+
+              processed += 1
+              if processed % 100 == 0:
+                  print(f'  processed {processed}/{len(smali_files)} files...')
+
+          print(f'[+] Done. Renamed {len(class_map)} classes, encrypted {str_count} strings.')
+          PYEOF
+          python3 /tmp/obfuscate.py
+
+      - name: Rebuild APK
+        run: |
+          apktool b decompiled/ -o obfuscated_unsigned.apk
+          echo "Rebuilt: $(ls -lh obfuscated_unsigned.apk | awk '{print $5}')"
+
+      - name: Align and sign APK
+        run: |
+          zipalign -v -p 4 obfuscated_unsigned.apk obfuscated_aligned.apk
+          keytool -genkeypair -v \
+            -keystore debug.keystore \
+            -alias taurus \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -storepass taurus123 \
+            -keypass taurus123 \
+            -dname "CN=Taurus, OU=Shield, O=Taurus, L=Shield, S=Shield, C=US" \
+            2>/dev/null || true
+          apksigner sign \
+            --ks debug.keystore \
+            --ks-key-alias taurus \
+            --ks-pass pass:taurus123 \
+            --key-pass pass:taurus123 \
+            --out out.apk \
+            obfuscated_aligned.apk
+          echo "Signed APK: $(ls -lh out.apk | awk '{print $5}')"
+          apksigner verify out.apk && echo "Signature OK"
+
+      - name: Upload obfuscated APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: obfuscate-${{ github.event.inputs.job_id }}
+          path: out.apk
+          retention-days: 1
