@@ -295,6 +295,15 @@ jobs:
           PYEOF
           CLASSES_FILTER="${{ github.event.inputs.classes_filter }}" python3 /tmp/obfuscate.py
 
+      - name: Promote const-string to const-string/jumbo
+        run: |
+          # After class renaming the string pool is reshuffled; strings that were
+          # at index ≤ 65535 may now exceed it.  const-string/jumbo uses a 32-bit
+          # index and is always valid, so promote every const-string instruction.
+          find decompiled/ -name "*.smali" -print0 | \
+            xargs -0 sed -i 's/const-string \([vp]\)/const-string\/jumbo \1/g'
+          echo "Promotion complete"
+
       - name: Rebuild APK
         run: |
           apktool b decompiled/ -o obfuscated_unsigned.apk
