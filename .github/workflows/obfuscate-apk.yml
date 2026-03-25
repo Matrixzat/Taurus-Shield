@@ -230,6 +230,56 @@ jobs:
 
           print(f'[+] Skipped {skipped} unrelated files (no references)')
           print(f'[+] Done. Renamed {len(class_map)} classes.')
+
+          # ── Phase 3: update AndroidManifest.xml and META-INF/services ───────────
+          # The manifest references classes by dot-format name (com.example.Foo).
+          # META-INF/services files do the same for ServiceLoader entries.
+          # Both must be updated or the app will crash at launch (ClassNotFoundException).
+
+          # Build a dot-format map: "com.example.Foo" -> "com.example.CJKName"
+          dot_map = {}
+          for old_cls, new_cls in class_map.items():
+              old_dot = old_cls[1:-1].replace('/', '.')   # Lcom/example/Foo; -> com.example.Foo
+              new_dot = new_cls[1:-1].replace('/', '.')
+              dot_map[old_dot] = new_dot
+
+          if dot_map:
+              # Sort longest-first to avoid partial matches
+              dot_sorted = sorted(dot_map.keys(), key=len, reverse=True)
+              dot_regex = re.compile('|'.join(re.escape(k) for k in dot_sorted))
+              def replace_dots(text):
+                  return dot_regex.sub(lambda m: dot_map[m.group(0)], text)
+
+              # Update AndroidManifest.xml
+              manifest_path = os.path.join(ROOT, 'AndroidManifest.xml')
+              if os.path.exists(manifest_path):
+                  with open(manifest_path, 'r', encoding='utf-8', errors='replace') as f:
+                      manifest = f.read()
+                  new_manifest = replace_dots(manifest)
+                  if new_manifest != manifest:
+                      with open(manifest_path, 'w', encoding='utf-8') as f:
+                          f.write(new_manifest)
+                      print(f'[+] Updated AndroidManifest.xml')
+                  else:
+                      print(f'[+] AndroidManifest.xml: no renamed classes referenced')
+
+              # Update META-INF/services files (ServiceLoader configs)
+              services_dir = os.path.join(ROOT, 'META-INF', 'services')
+              if os.path.isdir(services_dir):
+                  svc_count = 0
+                  for fname in os.listdir(services_dir):
+                      fpath = os.path.join(services_dir, fname)
+                      with open(fpath, 'r', encoding='utf-8', errors='replace') as f:
+                          content = f.read()
+                      new_content = replace_dots(content)
+                      if new_content != content:
+                          with open(fpath, 'w', encoding='utf-8') as f:
+                              f.write(new_content)
+                          svc_count += 1
+                  if svc_count:
+                      print(f'[+] Updated {svc_count} META-INF/services file(s)')
+
+          print(f'[+] All done.')
           PYEOF
           CLASSES_FILTER="${{ github.event.inputs.classes_filter }}" python3 /tmp/obfuscate.py
 
