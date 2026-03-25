@@ -270,38 +270,51 @@ jobs:
           FIELD_DEF_PATTERN = re.compile(r'^(\s*\.field\s+(?:[\w\s]+\s+)?)(\w[\w\d$]*)(:[\w\[L;/$]+.*)$')
 
           print(f'[+] Phase 2: Applying obfuscation...')
-          processed  = 0
-          skipped    = 0
-          str_count  = 0
-          OLD_CLASSES = list(class_map.keys())
+          processed = 0
+          skipped   = 0
+          str_count = 0
+
+          # Pre-compile a SINGLE regex that matches any old class name in one pass.
+          # Sort longest-first so longer names match before shorter prefixes.
+          if class_map:
+              sorted_keys = sorted(class_map.keys(), key=len, reverse=True)
+              class_regex = re.compile('|'.join(re.escape(k) for k in sorted_keys))
+              def replace_classes(content):
+                  return class_regex.sub(lambda m: class_map[m.group(0)], content)
+              def has_any_ref(content):
+                  return bool(class_regex.search(content))
+          else:
+              def replace_classes(content): return content
+              def has_any_ref(content): return False
 
           for fpath in smali_files:
               with open(fpath, 'r', encoding='utf-8', errors='replace') as f:
                   content = f.read()
 
-              # Detect this file's class from first .class directive
+              # Detect this file's own class
               cm = re.search(r'^\.class\s+(?:[\w\s]+\s+)?(\S+;)', content, re.MULTILINE)
               current_class = cm.group(1) if cm else None
 
               is_selected = current_class in class_map
-              has_ref     = any(old in content for old in OLD_CLASSES)
+              has_ref     = has_any_ref(content)
 
-              # Skip files that don't need any changes at all
+              # Skip files that need no changes at all
               if not is_selected and not has_ref:
                   skipped += 1
                   continue
 
-              lines     = content.splitlines(keepends=True)
-              new_lines = []
-              for line in lines:
-                  # Apply class renames in every file that references a renamed class
-                  if has_ref:
-                      for old, new in class_map.items():
-                          if old in line:
-                              line = line.replace(old, new)
+              # ── Step A: bulk replace ALL class renames in one regex pass ──────
+              if has_ref:
+                  content = replace_classes(content)
 
-                  # Method / field renaming — only inside the selected class file
-                  if is_selected and current_class and not should_skip_class(current_class):
+              # ── Step B: line-level transforms only for the selected class ──────
+              if is_selected and current_class and not should_skip_class(current_class):
+                  # Re-read current_class name after possible renaming
+                  new_current = class_map.get(current_class, current_class)
+                  lines     = content.splitlines(keepends=True)
+                  new_lines = []
+                  for line in lines:
+                      # Method renaming
                       mm = METHOD_PATTERN.match(line)
                       if mm:
                           prefix, mname, suffix = mm.group(1), mm.group(2), mm.group(3)
@@ -309,6 +322,7 @@ jobs:
                           if new_mname != mname:
                               line = prefix + new_mname + suffix + '\n'
 
+                      # Field renaming
                       fm = FIELD_DEF_PATTERN.match(line)
                       if fm:
                           prefix, fname, suffix = fm.group(1), fm.group(2), fm.group(3)
@@ -316,8 +330,7 @@ jobs:
                           if new_fname != fname:
                               line = prefix + new_fname + suffix + '\n'
 
-                  # String encryption — only inside selected class files
-                  if is_selected:
+                      # String encryption
                       sm = STR_PATTERN.match(line)
                       if sm:
                           prefix, val, suffix = sm.group(1), sm.group(2), sm.group(3)
@@ -327,7 +340,7 @@ jobs:
                                   reg_match = re.match(r'\s*const-string(?:/jumbo)?\s+(\w+),', line)
                                   if reg_match:
                                       reg = reg_match.group(1)
-                                      # invoke-static only works for v0-v15;
+                                      # invoke-static only supports v0-v15;
                                       # use invoke-static/range for v16+ to avoid register errors
                                       reg_num = int(reg[1:]) if reg[1:].isdigit() else 999
                                       dec_cls = class_map.get(DECRYPT_CLASS, DECRYPT_CLASS)
@@ -342,17 +355,17 @@ jobs:
                               except Exception:
                                   pass
 
-                  new_lines.append(line)
+                      new_lines.append(line)
+                  content = ''.join(new_lines)
 
               with open(fpath, 'w', encoding='utf-8') as f:
-                  f.writelines(new_lines)
+                  f.write(content)
 
               processed += 1
-              if processed % 100 == 0:
+              if processed % 200 == 0:
                   print(f'  processed {processed}/{len(smali_files)} files...')
 
           print(f'[+] Skipped {skipped} unrelated files (no references)')
-
           print(f'[+] Done. Renamed {len(class_map)} classes, encrypted {str_count} strings.')
           PYEOF
           CLASSES_FILTER="${{ github.event.inputs.classes_filter }}" python3 /tmp/obfuscate.py
