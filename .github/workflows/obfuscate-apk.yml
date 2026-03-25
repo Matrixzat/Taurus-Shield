@@ -134,31 +134,17 @@ jobs:
 
           # ── Phase 1: collect class names to rename ──────────────────────────
           class_map = {}   # old_class_path -> new_class_path
-          method_map = {}  # (class, method_sig) -> new_name
-          field_map  = {}  # (class, field_sig)  -> new_name
 
           SKIP_PREFIXES = [
               'Landroid/', 'Ljava/', 'Ljavax/', 'Ldalvik/', 'Lcom/google/android/',
               'Lcom/android/', 'Landroidx/', 'Lkotlin/', 'Lkotlinx/',
               'Lcom/squareup/', 'Lokhttp3/', 'Lretrofit2/', 'Lrx/',
           ]
-          SKIP_CLASSES = {'Landroid', 'Ljava', 'Lkotlin'}
-
           def should_skip_class(cls):
               for p in SKIP_PREFIXES:
                   if cls.startswith(p):
                       return True
               return False
-
-          KEEP_METHODS = {
-              '<init>', '<clinit>', 'onClick', 'onCreate', 'onStart', 'onStop',
-              'onResume', 'onPause', 'onDestroy', 'onCreateView', 'onViewCreated',
-              'onAttach', 'onDetach', 'onActivityCreated', 'onSaveInstanceState',
-              'onRestoreInstanceState', 'onRequestPermissionsResult',
-              'onActivityResult', 'onNewIntent', 'onBind', 'onUnbind',
-              'onStartCommand', 'onReceive', 'run', 'call', 'compare',
-              'hashCode', 'equals', 'toString', 'compareTo', 'getClass',
-          }
 
           print(f'[+] Phase 1: Mapping class names...')
           for fpath in smali_files:
@@ -201,28 +187,14 @@ jobs:
 
           print(f'[+] Will rename {len(class_map)} classes')
 
-          # ── Phase 2: apply class renaming + method/field renaming ──────────────
+          # ── Phase 2: class renaming only ────────────────────────────────────────
+          # NOTE: method/field renaming is intentionally excluded. Renaming a method
+          # definition without updating every call site across all smali files creates
+          # DUPLICATE method references (old name in callers + new name in definition),
+          # which pushes the DEX method-reference count past the 65535 hard limit and
+          # causes "Unsigned short value out of range" on rebuild.
 
-          def make_method_name(cls, name):
-              if name in KEEP_METHODS:
-                  return name
-              key = cls + '|' + name
-              if key not in method_map:
-                  h = hashlib.md5(key.encode()).hexdigest()[:4]
-                  method_map[key] = rand_cjk(2) + h
-              return method_map[key]
-
-          def make_field_name(cls, name):
-              key = cls + '|' + name
-              if key not in field_map:
-                  h = hashlib.md5(key.encode()).hexdigest()[:4]
-                  field_map[key] = rand_cjk(2) + h
-              return field_map[key]
-
-          METHOD_PATTERN = re.compile(r'^(\s*\.method\s+(?:[\w\s]+\s+)?)(\w[\w\d$]*)(\(.*\).*)$')
-          FIELD_DEF_PATTERN = re.compile(r'^(\s*\.field\s+(?:[\w\s]+\s+)?)(\w[\w\d$]*)(:[\w\[L;/$]+.*)$')
-
-          print(f'[+] Phase 2: Applying obfuscation...')
+          print(f'[+] Phase 2: Applying class renames...')
           processed = 0
           skipped   = 0
 
@@ -243,55 +215,21 @@ jobs:
               with open(fpath, 'r', encoding='utf-8', errors='replace') as f:
                   content = f.read()
 
-              # Detect this file's own class
-              cm = re.search(r'^\.class\s+(?:[\w\s]+\s+)?(\S+;)', content, re.MULTILINE)
-              current_class = cm.group(1) if cm else None
-
-              is_selected = current_class in class_map
-              has_ref     = has_any_ref(content)
-
-              # Skip files that need no changes at all
-              if not is_selected and not has_ref:
+              if not has_any_ref(content):
                   skipped += 1
                   continue
 
-              # ── Step A: bulk replace ALL class renames in one regex pass ──────
-              if has_ref:
-                  content = replace_classes(content)
-
-              # ── Step B: line-level transforms only for the selected class ──────
-              if is_selected and current_class and not should_skip_class(current_class):
-                  lines     = content.splitlines(keepends=True)
-                  new_lines = []
-                  for line in lines:
-                      # Method renaming
-                      mm = METHOD_PATTERN.match(line)
-                      if mm:
-                          prefix, mname, suffix = mm.group(1), mm.group(2), mm.group(3)
-                          new_mname = make_method_name(current_class, mname)
-                          if new_mname != mname:
-                              line = prefix + new_mname + suffix + '\n'
-
-                      # Field renaming
-                      fm = FIELD_DEF_PATTERN.match(line)
-                      if fm:
-                          prefix, fname, suffix = fm.group(1), fm.group(2), fm.group(3)
-                          new_fname = make_field_name(current_class, fname)
-                          if new_fname != fname:
-                              line = prefix + new_fname + suffix + '\n'
-
-                      new_lines.append(line)
-                  content = ''.join(new_lines)
+              new_content = replace_classes(content)
 
               with open(fpath, 'w', encoding='utf-8') as f:
-                  f.write(content)
+                  f.write(new_content)
 
               processed += 1
               if processed % 200 == 0:
                   print(f'  processed {processed}/{len(smali_files)} files...')
 
           print(f'[+] Skipped {skipped} unrelated files (no references)')
-          print(f'[+] Done. Renamed {len(class_map)} classes, {len(method_map)} methods, {len(field_map)} fields.')
+          print(f'[+] Done. Renamed {len(class_map)} classes.')
           PYEOF
           CLASSES_FILTER="${{ github.event.inputs.classes_filter }}" python3 /tmp/obfuscate.py
 
