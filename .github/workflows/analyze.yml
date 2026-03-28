@@ -26,7 +26,6 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
             -o input.zip
           ls -lh input.zip
-          file input.zip
 
       - name: Delete uploaded asset from release
         if: always()
@@ -34,17 +33,12 @@ jobs:
           curl -s -X DELETE \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" || true
-          echo "Upload slot cleaned up"
 
       - name: Extract libapp.so
         run: |
           mkdir -p extracted
           unzip -o input.zip -d extracted
 
-          echo "=== ZIP contents (first 30 entries) ==="
-          unzip -l input.zip | head -35
-
-          # Find libapp.so — prefer arm64 path first
           SO_PATH=$(find extracted/ -name "libapp.so" | grep -i "arm64" | head -1)
           if [ -z "$SO_PATH" ]; then
             SO_PATH=$(find extracted/ -name "libapp.so" | head -1)
@@ -56,31 +50,48 @@ jobs:
           fi
           echo "Found: $SO_PATH ($(wc -c < "$SO_PATH") bytes)"
 
-          # blutter expects the DIRECTORY that directly contains libapp.so
-          # (it does: os.path.join(indir, 'libapp.so'))
-          # So just pass the parent directory of wherever we found it.
           LIB_DIR=$(cd "$(dirname "$SO_PATH")" && pwd)
-          echo "Lib dir for blutter: $LIB_DIR"
-          ls -lh "$LIB_DIR"
-
-          echo "SO_PATH=$SO_PATH" >> $GITHUB_ENV
           echo "LIB_DIR=$LIB_DIR" >> $GITHUB_ENV
 
-      - name: Install build dependencies
+      # ── Only install what is NOT pre-installed on ubuntu-latest ──────────────
+      # cmake, ninja-build, clang, build-essential, git, python3-pip are all
+      # available by default — no need to install them.
+      - name: Install missing system libraries
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y \
-            cmake ninja-build clang build-essential pkg-config \
-            libicu-dev libcapstone-dev \
-            git python3-pip 2>/dev/null
-          pip3 install pyelftools requests
-          echo "cmake: $(cmake --version | head -1)"
-          echo "clang: $(clang --version | head -1)"
-          python3 -c "import elftools; print('pyelftools OK')"
+          sudo apt-get install -y --no-install-recommends libicu-dev libcapstone-dev
 
-      - name: Clone blutter
+      # ── Cache pip packages ────────────────────────────────────────────────────
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-blutter-pyelftools
+
+      - name: Install Python packages
+        run: pip3 install pyelftools requests --quiet
+
+      # ── Get blutter HEAD SHA for cache key (no full clone needed) ────────────
+      - name: Get blutter HEAD SHA
+        id: blutter-sha
         run: |
-          git clone --depth=1 https://github.com/worawit/blutter.git
+          SHA=$(git ls-remote https://github.com/worawit/blutter.git HEAD | cut -f1 | cut -c1-12)
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "Blutter SHA: $SHA"
+
+      # ── Restore blutter (clone + compiled Dart binaries) from cache ───────────
+      # Key includes blutter SHA so cache auto-refreshes when blutter updates.
+      # The compiled Dart-version-specific binaries live inside the blutter dir,
+      # so a cache hit means zero compilation on repeat runs with same Dart version.
+      - name: Restore blutter cache
+        id: blutter-cache
+        uses: actions/cache@v4
+        with:
+          path: blutter
+          key: blutter-${{ steps.blutter-sha.outputs.sha }}
+
+      - name: Clone blutter (cache miss only)
+        if: steps.blutter-cache.outputs.cache-hit != 'true'
+        run: git clone --depth=1 https://github.com/worawit/blutter.git
 
       - name: Run blutter analysis
         run: |
@@ -90,6 +101,14 @@ jobs:
           python3 blutter.py "$LIB_DIR" "$GITHUB_WORKSPACE/blutter_output" 2>&1 | tee "$GITHUB_WORKSPACE/blutter_run.log"
           exit ${PIPESTATUS[0]}
         timeout-minutes: 35
+
+      # ── Save blutter cache after first build (includes compiled binaries) ─────
+      - name: Save blutter cache
+        if: steps.blutter-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: blutter
+          key: blutter-${{ steps.blutter-sha.outputs.sha }}
 
       - name: Show output summary
         run: |
