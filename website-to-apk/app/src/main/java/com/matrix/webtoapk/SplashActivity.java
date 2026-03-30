@@ -41,10 +41,11 @@ public class SplashActivity extends AppCompatActivity {
                 if (customLottieJson != null) {
                     view.evaluateJavascript("loadLottieFromAndroid();", null);
                 } else {
-                    String appName = getString(R.string.app_name);
+                    String appName = getString(R.string.app_name)
+                        .replace("\\", "\\\\")
+                        .replace("'", "\\'");
                     view.evaluateJavascript(
-                        "document.getElementById('app-name').innerText = " +
-                        "JSON.stringify(" + appName + ");", null);
+                        "document.getElementById('app-name').innerText = '" + appName + "';", null);
                 }
             }
         });
