@@ -96,6 +96,13 @@ jobs:
           result = subprocess.run(['bash', '-c', 'echo sdk.dir=$ANDROID_HOME'], capture_output=True, text=True)
           w('wf/local.properties', result.stdout.strip() + '\n')
 
+          # gradle.properties — required for AndroidX
+          w('wf/gradle.properties',
+          'org.gradle.jvmargs=-Xmx2g\n'
+          'android.useAndroidX=true\n'
+          'android.enableJetifier=true\n'
+          'kotlin.code.style=official\n')
+
           # AndroidManifest.xml
           w('wf/app/src/main/AndroidManifest.xml', '''<?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
