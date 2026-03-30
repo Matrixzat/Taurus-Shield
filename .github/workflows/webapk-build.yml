@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           sparse-checkout: |
-            Taurus-Github-builder/website-to-apk
+            website-to-apk
           sparse-checkout-cone-mode: false
 
       - name: Download build ZIP from release
@@ -41,7 +41,7 @@ jobs:
 
       - name: Prepare build workspace
         run: |
-          cp -r Taurus-Github-builder/website-to-apk ./build_project
+          cp -r website-to-apk ./build_project
           mkdir -p build_input
           unzip -q build_input.zip -d build_input/
           rm -f build_input.zip
