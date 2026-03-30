@@ -837,7 +837,7 @@ ORIGINAL_PWD="$PWD"
 # Change directory to the directory where make.sh resides (project root)
 try cd "$(dirname "$0")"
 
-export ANDROID_HOME=$PWD/cmdline-tools/
+export ANDROID_HOME=${ANDROID_HOME:-$PWD/cmdline-tools/}
 export ANDROID_SDK_ROOT=$ANDROID_HOME
 unset ANDROID_NDK_HOME 2>/dev/null
 # Extract full applicationId from build.gradle
