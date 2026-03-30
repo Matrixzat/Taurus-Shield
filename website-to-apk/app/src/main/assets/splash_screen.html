@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>App Splash Screen</title>
+  <link
+    rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+  />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js"></script>
+  <style>
+    /* VARIABLES */
+    :root {
+      /* Default Theme (Theme 0: Deep Indigo) */
+      --color-background: #121212;
+      --color-surface: #1e1e1e;
+      --color-text-primary: #ffffff;
+      --color-text-secondary: #aaaaaa;
+      --color-accent: #6c63ff; 
+      --color-loader: #ffffff;
+      --shadow-elevation: 0 4px 12px rgba(0, 0, 0, 0.4);
+    }
+
+    /* BASE STYLES - CRITICAL FOR NON-SCROLLING */
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      font-family: "Inter", system-ui, -apple-system, sans-serif;
+    }
+
+    body {
+      background-color: var(--color-background);
+      min-height: 100vh;
+      width: 100vw;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      
+      /* THE CRUCIAL FIXES */
+      overflow: hidden; 
+      position: fixed; 
+      top: 0;
+      left: 0;
+    }
+
+    .splash-container {
+      text-align: center;
+      max-width: 90%;
+      width: 550px; 
+      padding: 2.5rem 2rem; 
+      background: var(--color-surface);
+      border-radius: 20px;
+      box-shadow: var(--shadow-elevation);
+      position: relative;
+      z-index: 10;
+      opacity: 0;
+      animation: fadeInUp 1s ease-out forwards;
+      max-height: 100vh; 
+      overflow: hidden;
+    }
+
+    /* LOGO & TITLE */
+    .logo {
+      margin-bottom: 2rem; 
+      border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+      padding-bottom: 1.2rem;
+    }
+
+    .logo .icon {
+        color: var(--color-accent);
+        font-size: 3.2rem; 
+        margin-bottom: 0.8rem;
+        animation: pulse 2s infinite; 
+    }
+
+    .logo h1 {
+      font-size: 2.8rem; 
+      font-weight: 900;
+      color: var(--color-text-primary);
+      letter-spacing: 1px;
+      /* FIX APPLIED HERE: Ensures the text stays on one line */
+      white-space: nowrap; 
+    }
+
+    .logo .tagline {
+      color: var(--color-text-secondary);
+      font-size: 1.0rem; 
+      font-weight: 400;
+      margin-top: 0.5rem;
+    }
+
+    /* PROFESSIONAL MESSAGES SECTION */
+    .features-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr); 
+        gap: 15px; 
+        margin-bottom: 2rem; 
+        text-align: left;
+    }
+
+    .feature-item {
+        display: flex;
+        align-items: center;
+        gap: 8px; 
+        color: var(--color-text-secondary);
+        font-size: 0.9rem; 
+        opacity: 0;
+        transform: translateY(10px);
+        animation: fadeInUp 0.5s ease-out forwards;
+    }
+    
+    /* Animation delays maintained */
+    .feature-item:nth-child(1) { animation-delay: 0.5s; }
+    .feature-item:nth-child(2) { animation-delay: 0.6s; }
+    .feature-item:nth-child(3) { animation-delay: 0.7s; }
+    .feature-item:nth-child(4) { animation-delay: 0.8s; }
+    .feature-item:nth-child(5) { animation-delay: 0.9s; }
+    .feature-item:nth-child(6) { animation-delay: 1.0s; }
+
+    .feature-item i {
+        color: var(--color-accent);
+        font-size: 1.1rem; 
+        animation: icon-bounce 1.5s ease-in-out infinite;
+    }
+
+    /* LOTTIE CONTAINER */
+    .lottie-container {
+      width: 100%;
+      max-width: 300px;
+      margin: 0 auto 1.5rem;
+      display: none;
+    }
+
+    .lottie-splash {
+      width: 100%;
+      height: auto;
+      min-height: 200px;
+    }
+
+    /* LOADER */
+    .loader-container {
+      margin: 1rem 0 2rem; 
+    }
+
+    .loader {
+      width: 70px; 
+      height: 70px;
+      margin: 0 auto;
+      position: relative;
+    }
+
+    .loader-ring {
+      position: absolute;
+      border-radius: 50%;
+      border: 4px solid rgba(255, 255, 255, 0.2);
+      animation: spin 1.5s linear infinite;
+    }
+
+    .loader-ring:nth-child(1) {
+      width: 70px;
+      height: 70px;
+      border-top-color: var(--color-accent);
+    }
+
+    .loader-ring:nth-child(2) {
+      width: 50px;
+      height: 50px;
+      top: 10px;
+      left: 10px;
+      border-bottom-color: var(--color-accent);
+      animation-direction: reverse;
+      animation-duration: 1.2s;
+    }
+
+    .check-icon {
+      width: 70px;
+      height: 70px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      position: absolute;
+      top: 0;
+      left: 0;
+      opacity: 0;
+      transform: scale(0.8);
+      animation: checkmark 0.6s cubic-bezier(0.68, -0.55, 0.265, 1.55) 2.6s forwards; 
+    }
+
+    .check-icon i {
+      font-size: 35px; 
+      color: var(--color-surface);
+      background: var(--color-accent);
+      border-radius: 50%;
+      padding: 7px;
+    }
+
+    .loading-text {
+      margin-top: 1.5rem; 
+      font-size: 0.95rem; 
+      font-weight: 500;
+      color: var(--color-text-primary);
+      letter-spacing: 0.3px;
+    }
+
+    .progress-container {
+      width: 100%;
+      max-width: 300px; 
+      height: 6px;
+      background: rgba(255, 255, 255, 0.1);
+      border-radius: 3px;
+      margin: 0.8rem auto 0;
+      overflow: hidden;
+    }
+
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: var(--color-accent);
+      border-radius: 3px;
+      animation: progress 2.5s cubic-bezier(0.65, 0, 0.35, 1) forwards; 
+      position: relative;
+      overflow: hidden;
+    }
+
+    .progress-bar::after {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: -100%;
+      width: 100%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.4), transparent);
+      animation: shimmer 1.5s infinite;
+    }
+
+    /* FOOTER (Quote) */
+    .footer {
+      margin-top: 1.5rem; 
+      padding-top: 1rem; 
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      color: var(--color-text-secondary);
+      font-size: 0.9rem;
+      opacity: 0;
+      animation: fadeIn 0.8s ease-out 3s forwards;
+      font-style: italic; 
+    }
+
+    .footer i {
+        color: var(--color-accent);
+        margin-right: 5px;
+    }
+
+    .footer a {
+      color: var(--color-accent);
+      text-decoration: none;
+      font-weight: 600;
+      transition: color 0.3s ease;
+    }
+
+    .footer a:hover {
+      color: #8a83ff;
+    }
+
+    /* BACKGROUND ELEMENTS */
+    .floating-elements {
+      position: fixed; /* Lock to viewport */
+      width: 100%;
+      height: 100%;
+      top: 0;
+      left: 0;
+      z-index: 1;
+    }
+
+    .floating-element {
+      position: absolute;
+      /* Background color now uses a CSS variable for themeing */
+      background: var(--floating-element-color, rgba(108, 99, 255, 0.1)); 
+      border-radius: 50%;
+      animation: float 10s ease-in-out infinite;
+    }
+
+    .floating-element:nth-child(1) { width: 100px; height: 100px; top: 5%; left: 5%; animation-delay: 0s; }
+    .floating-element:nth-child(2) { width: 150px; height: 150px; top: 80%; left: 85%; animation-delay: -3s; }
+    .floating-element:nth-child(3) { width: 70px; height: 70px; top: 20%; left: 80%; animation-delay: -6s; }
+    .floating-element:nth-child(4) { width: 120px; height: 120px; top: 60%; left: 10%; animation-delay: -8s; }
+
+    /* KEYFRAMES (No change needed) */
+    @keyframes spin { 100% { transform: rotate(360deg); } }
+    @keyframes progress { 100% { width: 100%; } }
+    @keyframes fadeIn { 100% { opacity: 1; } }
+    @keyframes fadeInUp {
+      0% { opacity: 0; transform: translateY(20px); }
+      100% { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes pulse {
+        0% { transform: scale(1); opacity: 1; }
+        50% { transform: scale(1.05); opacity: 0.9; }
+        100% { transform: scale(1); opacity: 1; }
+    }
+    @keyframes icon-bounce {
+        0%, 100% { transform: translateY(0); }
+        50% { transform: translateY(-2px); }
+    }
+    @keyframes checkmark {
+      0% { opacity: 0; transform: scale(0.8) rotate(-30deg); }
+      50% { opacity: 1; transform: scale(1.1) rotate(10deg); }
+      100% { opacity: 1; transform: scale(1) rotate(0deg); }
+    }
+    @keyframes float {
+      0%, 100% { transform: translateY(0) translateX(0); }
+      50% { transform: translateY(-30px) translateX(15px); }
+    }
+    @keyframes shimmer { 100% { left: 100%; } }
+
+    /* MEDIA QUERIES (RESPONSIVENESS) */
+    @media (max-width: 550px) {
+      .splash-container {
+        max-width: 95%;
+        padding: 2.5rem 1.5rem;
+      }
+
+      .logo h1 {
+        font-size: 2.5rem;
+        white-space: nowrap; 
+      }
+
+      .logo .tagline {
+        font-size: 1rem;
+      }
+
+      .features-grid {
+        grid-template-columns: 1fr;
+        gap: 15px;
+      }
+
+      .feature-item {
+        justify-content: center;
+        text-align: center;
+      }
+
+      .loader {
+        width: 60px;
+        height: 60px;
+      }
+
+      .loader-ring:nth-child(1) {
+        width: 60px;
+        height: 60px;
+      }
+
+      .loader-ring:nth-child(2) {
+        width: 40px;
+        height: 40px;
+        top: 10px;
+        left: 10px;
+      }
+
+      .check-icon {
+        width: 60px;
+        height: 60px;
+      }
+
+      .check-icon i {
+        font-size: 30px;
+        padding: 6px;
+      }
+
+      .footer {
+        font-size: 0.8rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="floating-elements">
+    <div class="floating-element"></div>
+    <div class="floating-element"></div>
+    <div class="floating-element"></div>
+    <div class="floating-element"></div>
+  </div>
+
+  <div class="splash-container">
+    <div class="logo">
+      <i class="fas fa-layer-group icon" id="app-icon"></i> 
+            <h1 id="app-name">__APP_NAME__</h1>
+      <div class="tagline" id="tagline">Crafting a seamless digital experience.</div>
+    </div>
+
+    <div class="lottie-container" id="lottieContainer">
+      <div class="lottie-splash" id="lottieSplash"></div>
+    </div>
+
+    <div class="features-grid" id="featuresGrid">
+        <div class="feature-item">
+            <i class="fas fa-bolt" data-icon-role="speed"></i>
+            <span>Optimizing for speed</span>
+        </div>
+        <div class="feature-item">
+            <i class="fas fa-shield-alt" data-icon-role="security"></i>
+            <span>Establishing secure connection</span>
+        </div>
+        <div class="feature-item">
+            <i class="fas fa-chart-line" data-icon-role="performance"></i>
+            <span>Enhancing performance</span>
+        </div>
+        <div class="feature-item">
+            <i class="fas fa-cloud-download-alt" data-icon-role="sync"></i>
+            <span>Syncing critical assets</span>
+        </div>
+        <div class="feature-item">
+            <i class="fas fa-cogs" data-icon-role="init"></i>
+            <span>Initializing core components</span>
+        </div>
+        <div class="feature-item">
+            <i class="fas fa-cube" data-icon-role="ui"></i>
+            <span>Rendering UI components</span>
+        </div>
+    </div>
+    
+    <div class="loader-container" id="loaderContainer">
+      <div class="loader">
+        <div class="loader-ring"></div>
+        <div class="loader-ring"></div>
+        <div class="check-icon"><i class="fas fa-check"></i></div> 
+      </div>
+      <div class="loading-text">Loading application resources...</div>
+      <div class="progress-container"><div class="progress-bar"></div></div>
+    </div>
+
+    <div class="footer">
+      <span id="footer-quote"></span>
+    </div>
+  </div>
+
+  <script>
+    // --- THEME LOGIC START ---
+
+    const themes = [
+        // Theme 0: Deep Indigo (Original)
+        { 
+            accent: '#6c63ff', 
+            background: '#121212', 
+            surface: '#1e1e1e',
+            iconApp: 'fas fa-layer-group',
+            iconSpeed: 'fas fa-bolt',
+            iconSecurity: 'fas fa-shield-alt',
+            iconPerformance: 'fas fa-chart-line',
+            iconSync: 'fas fa-cloud-download-alt',
+            iconInit: 'fas fa-cogs',
+            iconUi: 'fas fa-cube',
+            floatingOpacity: '0.1'
+        },
+        // Theme 1: Emerald Green
+        { 
+            accent: '#00cc66', 
+            background: '#0a0a0a', 
+            surface: '#181818',
+            iconApp: 'fas fa-compact-disc',
+            iconSpeed: 'fas fa-rocket',
+            iconSecurity: 'fas fa-lock',
+            iconPerformance: 'fas fa-tachometer-alt',
+            iconSync: 'fas fa-database',
+            iconInit: 'fas fa-screwdriver',
+            iconUi: 'fas fa-puzzle-piece',
+            floatingOpacity: '0.15'
+        },
+        // Theme 2: Vibrant Orange
+        { 
+            accent: '#ff9900', 
+            background: '#222222', 
+            surface: '#333333',
+            iconApp: 'fas fa-fire',
+            iconSpeed: 'fas fa-gas-pump',
+            iconSecurity: 'fas fa-fingerprint',
+            iconPerformance: 'fas fa-signal',
+            iconSync: 'fas fa-server',
+            iconInit: 'fas fa-tools',
+            iconUi: 'fas fa-brush',
+            floatingOpacity: '0.1'
+        },
+        // Theme 3: Sky Blue (Lighter Surface)
+        { 
+            accent: '#00bfff', 
+            background: '#0f172a', 
+            surface: '#1e293b',
+            iconApp: 'fas fa-braille',
+            iconSpeed: 'fas fa-running',
+            iconSecurity: 'fas fa-user-lock',
+            iconPerformance: 'fas fa-wave-square',
+            iconSync: 'fas fa-download',
+            iconInit: 'fas fa-microchip',
+            iconUi: 'fas fa-desktop',
+            floatingOpacity: '0.18'
+        },
+        // Theme 4: Sunset Red/Pink
+        { 
+            accent: '#ff5757', 
+            background: '#1c121e', 
+            surface: '#2a1a2e',
+            iconApp: 'fas fa-heart',
+            iconSpeed: 'fas fa-feather-alt',
+            iconSecurity: 'fas fa-user-shield',
+            iconPerformance: 'fas fa-thermometer-three-quarters',
+            iconSync: 'fas fa-upload',
+            iconInit: 'fas fa-terminal',
+            iconUi: 'fas fa-crop-alt',
+            floatingOpacity: '0.12'
+        },
+        // Theme 5: Gold/Yellow
+        { 
+            accent: '#ffd700', 
+            background: '#1a1a1a', 
+            surface: '#262626',
+            iconApp: 'fas fa-sun',
+            iconSpeed: 'fas fa-hourglass-half',
+            iconSecurity: 'fas fa-key',
+            iconPerformance: 'fas fa-star',
+            iconSync: 'fas fa-sitemap',
+            iconInit: 'fas fa-network-wired',
+            iconUi: 'fas fa-paint-brush',
+            floatingOpacity: '0.08'
+        },
+        // Theme 6: Teal
+        { 
+            accent: '#00a896', 
+            background: '#0d1d1d', 
+            surface: '#1a3030',
+            iconApp: 'fas fa-fan',
+            iconSpeed: 'fas fa-forward',
+            iconSecurity: 'fas fa-mask',
+            iconPerformance: 'fas fa-code-branch',
+            iconSync: 'fas fa-exchange-alt',
+            iconInit: 'fas fa-plug',
+            iconUi: 'fas fa-window-restore',
+            floatingOpacity: '0.15'
+        }
+    ];
+
+    const iconMap = {
+        'app-icon': 'iconApp',
+        'speed': 'iconSpeed',
+        'security': 'iconSecurity',
+        'performance': 'iconPerformance',
+        'sync': 'iconSync',
+        'init': 'iconInit',
+        'ui': 'iconUi'
+    };
+
+    function applyTheme() {
+        const root = document.documentElement;
+        // Get theme index from Android, default to 0 if not available
+        const themeIndex = (window.Android && window.Android.getThemeIndex) ? window.Android.getThemeIndex() : 0;
+        const selectedTheme = themes[themeIndex % themes.length]; // Ensure valid index
+
+        // 1. Apply Colors to CSS Variables
+        root.style.setProperty('--color-accent', selectedTheme.accent);
+        root.style.setProperty('--color-background', selectedTheme.background);
+        root.style.setProperty('--color-surface', selectedTheme.surface);
+        root.style.setProperty('--floating-element-color', `rgba(${hexToRgb(selectedTheme.accent)}, ${selectedTheme.floatingOpacity})`);
+
+        // 2. Apply New Icons
+        const appIconElement = document.getElementById('app-icon');
+        if (appIconElement) {
+            appIconElement.className = 'icon ' + selectedTheme.iconApp;
+        }
+
+        document.querySelectorAll('.feature-item i').forEach(iconElement => {
+            const role = iconElement.getAttribute('data-icon-role');
+            const themeKey = iconMap[role];
+            if (themeKey && selectedTheme[themeKey]) {
+                iconElement.className = selectedTheme[themeKey];
+            }
+        });
+    }
+
+    // Helper function to convert hex color to RGB for the floating elements' opacity
+    function hexToRgb(hex) {
+        let bigint = parseInt(hex.substring(1), 16);
+        let r = (bigint >> 16) & 255;
+        let g = (bigint >> 8) & 255;
+        let b = bigint & 255;
+        return `${r}, ${g}, ${b}`;
+    }
+
+    // --- QUOTES LOGIC ---
+    const quotes = [
+        "Innovation is the ability to see change as an opportunity, not a threat. – Ben Franklin",
+        "The best way to predict the future is to create it. – Peter Drucker",
+        "Simplicity is the ultimate sophistication. – Leonardo da Vinci",
+        "Strive not to be a success, but rather to be of value. – Albert Einstein",
+        "The only way to do great work is to love what you do. – Steve Jobs",
+        "Your work is going to fill a large part of your life, and the only way to be truly satisfied is to do what you believe is great work. – Steve Jobs",
+        "If you are not embarrassed by the first version of your product, you’ve launched too late. – Reid Hoffman",
+        "Ideas are easy. Implementation is hard. – Guy Kawasaki",
+        "The best time to plant a tree was 20 years ago. The second best time is now. – Chinese Proverb",
+        "Details matter, it’s worth waiting to get it right. – Steve Jobs",
+        "Success is not final; failure is not fatal: It is the courage to continue that counts. – Winston Churchill",
+        "The only limit to our realization of tomorrow will be our doubts of today. – Franklin D. Roosevelt",
+        "You miss 100% of the shots you don't take. – Wayne Gretzky",
+        "The purpose of our lives is to be happy. – Dalai Lama",
+        "The mind is everything. What you think you become. – Buddha",
+        "Either you run the day or the day runs you. – Jim Rohn",
+        "It does not matter how slowly you go as long as you do not stop. – Confucius",
+        "Quality is not an act, it is a habit. – Aristotle",
+        "The way to get started is to quit talking and begin doing. – Walt Disney"
+    ];
+
+    // --- LOTTIE LOADER (Called from Android after page loads) ---
+    function loadLottieFromAndroid() {
+        const lottieContainer = document.getElementById('lottieContainer');
+        const lottieSplash = document.getElementById('lottieSplash');
+        const featuresGrid = document.getElementById('featuresGrid');
+        const loaderContainer = document.getElementById('loaderContainer');
+
+        try {
+            if (window.Android && window.Android.hasCustomLottie && window.Android.hasCustomLottie()) {
+                const jsonString = window.Android.getCustomLottieJson();
+                if (jsonString) {
+                    const animationData = JSON.parse(jsonString);
+                    lottieContainer.style.display = 'block';
+                    featuresGrid.style.display = 'none';
+                    loaderContainer.style.display = 'none';
+
+                    lottie.loadAnimation({
+                        container: lottieSplash,
+                        renderer: 'svg',
+                        loop: true,
+                        autoplay: true,
+                        animationData: animationData
+                    });
+                }
+            }
+        } catch (err) {
+            console.log('Lottie load error:', err);
+        }
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        applyTheme();
+        
+        const footerText = document.getElementById('footer-quote');
+        if (footerText) {
+            const randomIndex = Math.floor(Math.random() * quotes.length);
+            footerText.innerHTML = `<i class="fas fa-quote-left"></i> ${quotes[randomIndex]}`;
+        }
+    });
+  </script>
+</body>
+</html>

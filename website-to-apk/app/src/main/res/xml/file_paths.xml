@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 
+      This path grants access to the root of the standard public Downloads directory.
+      The FileProvider needs this to share files saved by the DownloadManager
+      and the Base64 download bridge.
+    -->
+    <external-path
+        name="external_files"
+        path="Download/" />
+
+    <!--
+      This is a common fallback path, granting access to the root of the
+      external storage directory.
+    -->
+    <external-path
+        name="external_storage_root"
+        path="." />
+
+</paths>
