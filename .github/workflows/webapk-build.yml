@@ -95,6 +95,19 @@ jobs:
           ./make.sh apply_config webapk.conf
           echo "Configuration applied"
 
+      - name: Configure signing
+        working-directory: build_project
+        run: |
+          SIGN_APK=$(grep -oP '(?<=signApk = )\S+' webapk.conf 2>/dev/null || echo "true")
+          echo "signApk flag: '$SIGN_APK'"
+          if [ "$SIGN_APK" = "false" ]; then
+            echo "Unsigned build requested — removing signing config from build.gradle"
+            sed -i 's/signingConfig signingConfigs\.release//' app/build.gradle
+            echo "Signing config removed — output will be app-release-unsigned.apk"
+          else
+            echo "Signed build — using committed keystore"
+          fi
+
       - name: Build APK
         working-directory: build_project
         run: |
@@ -102,9 +115,17 @@ jobs:
           echo "=== Build output ==="
           find . -name "*.apk" | head -5
 
+      - name: Locate APK
+        id: locate_apk
+        working-directory: build_project
+        run: |
+          APK=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
+          echo "apk_path=build_project/$APK" >> $GITHUB_OUTPUT
+          echo "APK found: $APK"
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: webapk-${{ github.event.inputs.job_id }}
-          path: build_project/app/build/outputs/apk/release/app-release.apk
+          path: ${{ steps.locate_apk.outputs.apk_path }}
           retention-days: 1
