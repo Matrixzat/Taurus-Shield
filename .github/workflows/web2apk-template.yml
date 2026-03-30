@@ -1,0 +1,106 @@
+name: Web 2 Apk — Publish Template
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'Release asset ID of the uploaded template APK'
+        required: true
+      job_id:
+        description: 'Unique job ID'
+        required: true
+
+jobs:
+  publish-template:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download uploaded template APK
+        run: |
+          curl -fL \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
+            -o web2apk_template.apk
+          echo "Downloaded: $(ls -lh web2apk_template.apk)"
+
+      - name: Delete upload slot asset
+        if: always()
+        run: |
+          curl -s -X DELETE \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" || true
+          echo "Upload slot cleaned up"
+
+      - name: Install signing tools
+        run: sudo apt-get install -y zipalign apksigner 2>/dev/null
+
+      - name: Sign template APK
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/release.keystore
+
+          echo "Zipaligning…"
+          zipalign -f 4 web2apk_template.apk web2apk_template_aligned.apk
+
+          echo "Signing…"
+          apksigner sign \
+            --ks /tmp/release.keystore \
+            --ks-key-alias "${{ secrets.KEYSTORE_ALIAS }}" \
+            --ks-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
+            --key-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
+            --out web2apk_template_signed.apk \
+            web2apk_template_aligned.apk
+
+          mv web2apk_template_signed.apk web2apk_template.apk
+          rm -f web2apk_template_aligned.apk /tmp/release.keystore
+          apksigner verify web2apk_template.apk && echo "Signature OK"
+          echo "Final APK: $(ls -lh web2apk_template.apk)"
+
+      - name: Create or update web2apk-template release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Delete existing release if present
+          RELEASE_ID=$(curl -s \
+            -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/web2apk-template" \
+            | jq -r '.id // empty')
+
+          if [ -n "$RELEASE_ID" ]; then
+            echo "Deleting existing release $RELEASE_ID"
+            curl -s -X DELETE \
+              -H "Authorization: token $GH_TOKEN" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID"
+          fi
+
+          # Delete tag if it exists
+          curl -s -X DELETE \
+            -H "Authorization: token $GH_TOKEN" \
+            "https://api.github.com/repos/${{ github.repository }}/git/refs/tags/web2apk-template" || true
+
+          # Create fresh release
+          RELEASE_ID=$(curl -s -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            "https://api.github.com/repos/${{ github.repository }}/releases" \
+            -d '{
+              "tag_name":   "web2apk-template",
+              "name":       "Web 2 Apk Template",
+              "body":       "Signed template APK used by Taurus Shield Web 2 Apk Builder. Updated automatically.",
+              "draft":      false,
+              "prerelease": false
+            }' | jq -r '.id')
+
+          echo "Created release: $RELEASE_ID"
+
+          # Upload the signed template APK
+          curl -s -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/vnd.android.package-archive" \
+            "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=web2apk_template.apk" \
+            --data-binary @web2apk_template.apk
+
+          echo "Template APK published to web2apk-template release"
