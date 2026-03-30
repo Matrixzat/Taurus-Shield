@@ -1,0 +1,110 @@
+name: Build Web2Apk APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'GitHub release asset ID of the build ZIP (webapk.conf + icon.png + optional custom_splash.json)'
+        required: true
+      job_id:
+        description: 'Job correlation ID for artifact naming'
+        required: true
+
+jobs:
+  build:
+    name: Web2Apk Gradle Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            Taurus-Github-builder/website-to-apk
+          sparse-checkout-cone-mode: false
+
+      - name: Download build ZIP from release
+        run: |
+          curl -fL \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" \
+            -o build_input.zip
+          echo "Downloaded: $(ls -lh build_input.zip)"
+          curl -fsSL -X DELETE \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" || true
+          echo "Asset deleted after download"
+
+      - name: Prepare build workspace
+        run: |
+          cp -r Taurus-Github-builder/website-to-apk ./build_project
+          mkdir -p build_input
+          unzip -q build_input.zip -d build_input/
+          rm -f build_input.zip
+
+          echo "=== Build input contents ==="
+          ls -la build_input/
+
+          [ -f build_input/webapk.conf ] || { echo "ERROR: webapk.conf not found in ZIP"; exit 1; }
+          cp build_input/webapk.conf build_project/webapk.conf
+          echo "=== Config ==="
+          cat build_project/webapk.conf
+
+          if [ -f build_input/icon.png ]; then
+            cp build_input/icon.png build_project/icon.png
+            echo "Icon ready for make.sh at icon.png"
+          else
+            echo "No custom icon — make.sh will use template default"
+          fi
+
+          if [ -f build_input/custom_splash.json ]; then
+            mkdir -p build_project/app/src/main/assets
+            cp build_input/custom_splash.json build_project/app/src/main/assets/custom_splash.json
+            echo "Custom Lottie splash placed"
+          fi
+
+          chmod +x build_project/gradlew build_project/make.sh
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Generate keystore
+        working-directory: build_project
+        run: |
+          if [ ! -f app/my-release-key.jks ]; then
+            keytool -genkey -v \
+              -keystore app/my-release-key.jks \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -alias my -storepass 123456 -keypass 123456 \
+              -dname "CN=Developer, OU=Org, O=Company, L=City, S=State, C=US"
+            echo "Keystore generated"
+          else
+            echo "Keystore already present"
+          fi
+
+      - name: Apply configuration
+        working-directory: build_project
+        run: |
+          ./make.sh apply_config webapk.conf
+          echo "Configuration applied"
+
+      - name: Build APK
+        working-directory: build_project
+        run: |
+          ./gradlew assembleRelease --no-daemon --quiet
+          echo "=== Build output ==="
+          find . -name "*.apk" | head -5
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: webapk-${{ github.event.inputs.job_id }}
+          path: build_project/app/build/outputs/apk/release/app-release.apk
+          retention-days: 1
