@@ -223,7 +223,6 @@ jobs:
                   s.setSupportZoom(true); s.builtInZoomControls = false
                   s.loadWithOverviewMode = true; s.useWideViewPort = true
                   @Suppress("DEPRECATION") s.savePassword = b("SavePassword", true)
-                  s.geolocationEnabled = b("geolocationEnabled", true)
                   if (b("forceDarkTheme") && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                       @Suppress("DEPRECATION") s.forceDark = WebSettings.FORCE_DARK_ON
                   }
@@ -237,6 +236,13 @@ jobs:
                   webView.webViewClient = object : WebViewClient() {
                       override fun shouldOverrideUrlLoading(v: WebView, r: android.webkit.WebResourceRequest): Boolean {
                           v.loadUrl(r.url.toString()); return false
+                      }
+                  }
+                  if (b("geolocationEnabled", true)) {
+                      webView.webChromeClient = object : android.webkit.WebChromeClient() {
+                          override fun onGeolocationPermissionsShowPrompt(origin: String, callback: android.webkit.GeolocationPermissions.Callback) {
+                              callback.invoke(origin, b("AllowGeolocationPermissionAlways", true), false)
+                          }
                       }
                   }
               }
