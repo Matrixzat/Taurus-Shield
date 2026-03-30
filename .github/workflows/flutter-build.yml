@@ -1,87 +1,121 @@
 name: Build Taurus Shield APK
 
-  on:
-    workflow_dispatch:
-      inputs:
-        asset_id:
-          description: 'GitHub release asset ID of the uploaded project ZIP'
-          required: true
-        job_id:
-          description: 'Job correlation ID for artifact naming'
-          required: true
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'GitHub release asset ID of the uploaded project ZIP'
+        required: true
+      job_id:
+        description: 'Job correlation ID for artifact naming'
+        required: true
 
-  jobs:
-    build:
-      name: Flutter Build (arm + arm64)
-      runs-on: ubuntu-latest
-      timeout-minutes: 30
-      permissions:
-        contents: write
+jobs:
+  build:
+    name: Flutter Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
 
-      steps:
-        - name: Download project ZIP from release
-          run: |
-            curl -fL \
-              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/octet-stream" \
-              "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" \
-              -o project.zip
-            echo "Downloaded: $(ls -lh project.zip)"
-            unzip -q project.zip -d project/
-            curl -fsSL -X DELETE \
-              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" || true
-            echo "Asset deleted from release immediately after extraction"
-            rm -f project.zip
-            echo "Contents:"
-            ls project/
+    steps:
+      - name: Download project ZIP from release
+        run: |
+          curl -fL \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" \
+            -o project.zip
+          echo "Downloaded: $(ls -lh project.zip)"
+          unzip -q project.zip -d project/
+          curl -fsSL -X DELETE \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" || true
+          echo "Asset deleted from release immediately after extraction"
+          rm -f project.zip
+          echo "Contents:"
+          ls project/
 
-        - name: Locate Flutter project root
-          id: locate
-          run: |
-            ROOT=$(find project/ -name "pubspec.yaml" | head -1 | xargs dirname)
-            echo "Flutter root: $ROOT"
-            echo "flutter_root=$ROOT" >> "$GITHUB_OUTPUT"
+      - name: Locate Flutter project root
+        id: locate
+        run: |
+          ROOT=$(find project/ -name "pubspec.yaml" | head -1 | xargs dirname)
+          echo "Flutter root: $ROOT"
+          echo "flutter_root=$ROOT" >> "$GITHUB_OUTPUT"
 
-        - name: Set up Java 17
-          uses: actions/setup-java@v4
-          with:
-            distribution: temurin
-            java-version: '17'
+      - name: Detect target platform
+        id: platform
+        working-directory: ${{ steps.locate.outputs.flutter_root }}
+        run: |
+          PLATFORM=""
 
-        - name: Set up Flutter 3.29.1
-          uses: subosito/flutter-action@v2
-          with:
-            flutter-version: '3.29.1'
-            channel: 'stable'
-            cache: true
+          for f in $(find . -maxdepth 2 -name "*.yml" -o -name "*.yaml" 2>/dev/null); do
+            match=$(grep -i 'flutter-target-platform' "$f" 2>/dev/null | head -1 | sed 's/.*: *//' | tr -d '[:space:]"'\''')
+            if [ -n "$match" ]; then
+              PLATFORM="$match"
+              echo "Found platform '$PLATFORM' in $f"
+              break
+            fi
+          done
 
-        - name: Get dependencies
-          working-directory: ${{ steps.locate.outputs.flutter_root }}
-          run: flutter pub get
+          if [ -z "$PLATFORM" ]; then
+            for f in $(find . -maxdepth 2 -name "*.yml" -o -name "*.yaml" 2>/dev/null); do
+              match=$(grep -i 'target-platform' "$f" 2>/dev/null | grep -v '#' | head -1 | sed 's/.*: *//' | tr -d '[:space:]"'\''')
+              if [ -n "$match" ]; then
+                PLATFORM="$match"
+                echo "Found platform '$PLATFORM' in $f"
+                break
+              fi
+            done
+          fi
 
-        - name: Analyze (flutter analyze)
-          working-directory: ${{ steps.locate.outputs.flutter_root }}
-          run: |
-            flutter analyze --no-fatal-infos 2>&1 | tee /tmp/analyze.log || true
-            echo '--- analyze complete ---'
-            cat /tmp/analyze.log
+          if [ -z "$PLATFORM" ]; then
+            PLATFORM="android-arm,android-arm64"
+            echo "No platform specified in project — defaulting to both: $PLATFORM"
+          fi
 
-        - name: Build release APK (arm + arm64)
-          working-directory: ${{ steps.locate.outputs.flutter_root }}
-          run: |
-            flutter build apk \
-              --release \
-              --target-platform android-arm,android-arm64 \
-              --obfuscate \
-              --split-debug-info=build/debug-info
-            echo "Build complete:"
-            ls -lh build/app/outputs/flutter-apk/
+          echo "target_platform=$PLATFORM" >> "$GITHUB_OUTPUT"
+          echo "Building for: $PLATFORM"
 
-        - name: Upload APK artifact
-          uses: actions/upload-artifact@v4
-          with:
-            name: flutter-apk-${{ github.event.inputs.job_id }}
-            path: ${{ steps.locate.outputs.flutter_root }}/build/app/outputs/flutter-apk/app-release.apk
-            retention-days: 1
-  
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Flutter 3.29.1
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.29.1'
+          channel: 'stable'
+          cache: true
+
+      - name: Get dependencies
+        working-directory: ${{ steps.locate.outputs.flutter_root }}
+        run: flutter pub get
+
+      - name: Analyze (flutter analyze)
+        working-directory: ${{ steps.locate.outputs.flutter_root }}
+        run: |
+          flutter analyze --no-fatal-infos 2>&1 | tee /tmp/analyze.log || true
+          echo '--- analyze complete ---'
+          cat /tmp/analyze.log
+
+      - name: Build release APK
+        working-directory: ${{ steps.locate.outputs.flutter_root }}
+        run: |
+          echo "Target platform: ${{ steps.platform.outputs.target_platform }}"
+          flutter build apk \
+            --release \
+            --target-platform ${{ steps.platform.outputs.target_platform }} \
+            --obfuscate \
+            --split-debug-info=build/debug-info
+          echo "Build complete:"
+          ls -lh build/app/outputs/flutter-apk/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flutter-apk-${{ github.event.inputs.job_id }}
+          path: ${{ steps.locate.outputs.flutter_root }}/build/app/outputs/flutter-apk/app-release.apk
+          retention-days: 1
