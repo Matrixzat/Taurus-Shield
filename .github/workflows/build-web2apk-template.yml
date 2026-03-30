@@ -321,21 +321,12 @@ jobs:
       - name: Publish web2apk-template release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
         run: |
-          API="https://api.github.com/repos/$REPO"
-          OLD=$(curl -sf -H "Authorization: token $GH_TOKEN" "$API/releases/tags/web2apk-template" | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*' || true)
-          if [ -n "$OLD" ]; then
-            curl -s -X DELETE -H "Authorization: token $GH_TOKEN" "$API/releases/$OLD"
-          fi
-          curl -s -X DELETE -H "Authorization: token $GH_TOKEN" "$API/git/refs/tags/web2apk-template" || true
-          NEW=$(curl -sf -X POST -H "Authorization: token $GH_TOKEN" -H "Content-Type: application/json" \
-            "$API/releases" \
-            -d '{"tag_name":"web2apk-template","name":"Web2Apk Template","body":"Template APK for Taurus Shield Web2Apk Builder.","draft":false,"prerelease":false}' \
-            | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
-          echo "Release ID: $NEW"
-          curl -sf -X POST -H "Authorization: token $GH_TOKEN" \
-            -H "Content-Type: application/vnd.android.package-archive" \
-            "https://uploads.github.com/repos/$REPO/releases/$NEW/assets?name=web2apk_template.apk" \
-            --data-binary @/tmp/web2apk_template.apk | grep -o '"name":"[^"]*"'
-          echo "Template APK published"
+          gh release delete web2apk-template --yes --repo "${{ github.repository }}" 2>/dev/null || true
+          git -C /tmp init dummy-repo 2>/dev/null || true
+          gh release create web2apk-template \
+            --repo "${{ github.repository }}" \
+            --title "Web2Apk Template" \
+            --notes "Template APK for Taurus Shield Web2Apk Builder." \
+            /tmp/web2apk_template.apk#web2apk_template.apk
+          echo "Template APK published successfully"
