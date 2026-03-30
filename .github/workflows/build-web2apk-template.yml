@@ -1,0 +1,451 @@
+name: WebForge — Build & Publish Template
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-template:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    permissions:
+      contents: write
+
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Create WebForge template project
+        run: |
+          mkdir -p wf/app/src/main/kotlin/com/matrix/webtoapk
+          mkdir -p wf/app/src/main/res/values
+          mkdir -p wf/app/src/main/res/mipmap-mdpi-v4
+          mkdir -p wf/app/src/main/res/mipmap-hdpi-v4
+          mkdir -p wf/app/src/main/res/mipmap-xhdpi-v4
+          mkdir -p wf/app/src/main/res/mipmap-xxhdpi-v4
+          mkdir -p wf/app/src/main/res/mipmap-xxxhdpi-v4
+          mkdir -p wf/app/src/main/assets
+          mkdir -p wf/gradle/wrapper
+
+          # ── settings.gradle ──────────────────────────────────────────────
+          cat > wf/settings.gradle << 'EOF'
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+rootProject.name = "WebForge"
+include ':app'
+EOF
+
+          # ── build.gradle (root) ──────────────────────────────────────────
+          cat > wf/build.gradle << 'EOF'
+plugins {
+    id 'com.android.application' version '8.3.2' apply false
+    id 'org.jetbrains.kotlin.android' version '1.9.23' apply false
+}
+EOF
+
+          # ── gradle wrapper properties ────────────────────────────────────
+          cat > wf/gradle/wrapper/gradle-wrapper.properties << 'EOF'
+distributionBase=GRADLE_USER_HOME
+distributionPath=wrapper/dists
+distributionUrl=https\://services.gradle.org/distributions/gradle-8.6-bin.zip
+zipStoreBase=GRADLE_USER_HOME
+zipStorePath=wrapper/dists
+EOF
+
+          # ── app/build.gradle ─────────────────────────────────────────────
+          cat > wf/app/build.gradle << 'EOF'
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.matrix.webtoapk'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.matrix.webtoapk"
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName "1.0.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig null
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = '17' }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.webkit:webkit:1.11.0'
+}
+EOF
+
+          echo "sdk.dir=$ANDROID_HOME" > wf/local.properties
+
+          # ── AndroidManifest.xml ──────────────────────────────────────────
+          cat > wf/app/src/main/AndroidManifest.xml << 'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.WebApp"
+        android:usesCleartextTraffic="true">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
+            android:screenOrientation="unspecified"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
+EOF
+
+          # ── strings.xml ──────────────────────────────────────────────────
+          cat > wf/app/src/main/res/values/strings.xml << 'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">WebForge App</string>
+</resources>
+EOF
+
+          # ── styles.xml ───────────────────────────────────────────────────
+          cat > wf/app/src/main/res/values/styles.xml << 'EOF'
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.WebApp" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@android:color/black</item>
+        <item name="android:statusBarColor">@android:color/black</item>
+        <item name="android:navigationBarColor">@android:color/black</item>
+    </style>
+</resources>
+EOF
+
+          # ── placeholder webforge.conf ────────────────────────────────────
+          cat > wf/app/src/main/assets/webforge.conf << 'EOF'
+# DO NOT REMOVE
+mainURL = https://example.com
+requireDoubleBackToExit = true
+allowSubdomains = true
+enableExternalLinks = true
+openExternalLinksInBrowser = false
+confirmOpenInBrowser = true
+allowOpenMobileApp = true
+confirmOpenExternalApp = false
+allowSwipeToNavigate = true
+cookies = ENABLED
+basicAuth = 
+userAgent = 
+blockLocalhostRequests = false
+JSEnabled = true
+JSCanOpenWindowsAutomatically = true
+DomStorageEnabled = true
+AppCacheEnabled = true
+CacheMode = LOAD_DEFAULT
+DatabaseEnabled = true
+MediaPlaybackRequiresUserGesture = true
+SavePassword = true
+AllowFileAccess = true
+AllowFileAccessFromFileURLs = true
+AllowUniversalAccessFromFileURLs = true
+forceLandscapeMode = false
+edgeToEdge = false
+forceDarkTheme = true
+enablePullToRefresh = true
+DebugWebView = false
+geolocationEnabled = true
+AllowGeolocationPermissionAlways = true
+showDetailsOnErrorScreen = false
+biometricLockEnabled = false
+biometricTimeoutMinutes = 5
+biometricType = both
+EOF
+
+          # ── MainActivity.kt ──────────────────────────────────────────────
+          cat > wf/app/src/main/kotlin/com/matrix/webtoapk/MainActivity.kt << 'EOF'
+package com.matrix.webtoapk
+
+import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.pm.ActivityInfo
+import android.os.Build
+import android.os.Bundle
+import android.view.View
+import android.view.WindowInsets
+import android.view.WindowInsetsController
+import android.webkit.*
+import android.widget.FrameLayout
+
+class MainActivity : Activity() {
+
+    private lateinit var webView: WebView
+    private val conf = HashMap<String, String>()
+
+    @SuppressLint("SetJavaScriptEnabled")
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        loadConf()
+
+        requestedOrientation = if (b("forceLandscapeMode"))
+            ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE
+        else
+            ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+
+        if (b("edgeToEdge")) applyEdgeToEdge()
+
+        webView = WebView(this)
+        webView.layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        )
+        setContentView(webView)
+        configureWebView()
+        webView.loadUrl(s("mainURL", "https://example.com"))
+    }
+
+    private fun loadConf() {
+        try {
+            assets.open("webforge.conf").bufferedReader().use { r ->
+                r.lineSequence()
+                    .filter { it.isNotBlank() && !it.trimStart().startsWith("#") }
+                    .forEach { line ->
+                        val idx = line.indexOf('=')
+                        if (idx > 0) {
+                            conf[line.substring(0, idx).trim()] = line.substring(idx + 1).trim()
+                        }
+                    }
+            }
+        } catch (_: Exception) {}
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun configureWebView() {
+        val settings = webView.settings
+        settings.javaScriptEnabled = b("JSEnabled", true)
+        settings.javaScriptCanOpenWindowsAutomatically = b("JSCanOpenWindowsAutomatically", true)
+        settings.domStorageEnabled = b("DomStorageEnabled", true)
+        settings.databaseEnabled = b("DatabaseEnabled", true)
+        settings.allowFileAccess = b("AllowFileAccess", true)
+        @Suppress("DEPRECATION")
+        settings.allowFileAccessFromFileURLs = b("AllowFileAccessFromFileURLs", true)
+        @Suppress("DEPRECATION")
+        settings.allowUniversalAccessFromFileURLs = b("AllowUniversalAccessFromFileURLs", true)
+        settings.mediaPlaybackRequiresUserGesture = b("MediaPlaybackRequiresUserGesture", true)
+        settings.setSupportZoom(true)
+        settings.builtInZoomControls = false
+        settings.loadWithOverviewMode = true
+        settings.useWideViewPort = true
+        @Suppress("DEPRECATION")
+        settings.savePassword = b("SavePassword", true)
+        settings.geolocationEnabled = b("geolocationEnabled", true)
+        if (b("forceDarkTheme") && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            @Suppress("DEPRECATION")
+            settings.forceDark = WebSettings.FORCE_DARK_ON
+        }
+        settings.cacheMode = when (s("CacheMode", "LOAD_DEFAULT")) {
+            "LOAD_CACHE_ELSE_NETWORK" -> WebSettings.LOAD_CACHE_ELSE_NETWORK
+            "LOAD_NO_CACHE"           -> WebSettings.LOAD_NO_CACHE
+            "LOAD_CACHE_ONLY"         -> WebSettings.LOAD_CACHE_ONLY
+            else                      -> WebSettings.LOAD_DEFAULT
+        }
+        val ua = s("userAgent")
+        if (ua.isNotEmpty()) settings.userAgentString = ua
+
+        webView.webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                val url = request.url.toString()
+                val mainHost = try { java.net.URI(s("mainURL", "")).host ?: "" } catch (_: Exception) { "" }
+                val reqHost = request.url.host ?: ""
+                val sameHost = reqHost == mainHost
+                val subDomain = b("allowSubdomains", true) && reqHost.endsWith(".$mainHost")
+                return if (sameHost || subDomain) {
+                    view.loadUrl(url); false
+                } else {
+                    if (b("enableExternalLinks", true)) {
+                        view.loadUrl(url); false
+                    } else true
+                }
+            }
+        }
+    }
+
+    private fun applyEdgeToEdge() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false)
+            window.insetsController?.apply {
+                hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
+                systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = (
+                View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+            )
+        }
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun onBackPressed() {
+        if (webView.canGoBack()) webView.goBack()
+        else super.onBackPressed()
+    }
+
+    private fun b(key: String, default: Boolean = false) =
+        (conf[key] ?: if (default) "true" else "false") == "true"
+
+    private fun s(key: String, default: String = "") = conf[key] ?: default
+}
+EOF
+
+          # ── Placeholder launcher icon (1×1 red PNG) ──────────────────────
+          python3 - << 'PYEOF'
+import struct, zlib, os
+
+def make_png(r, g, b):
+    def chunk(t, d):
+        c = zlib.crc32(t + d) & 0xFFFFFFFF
+        return struct.pack('>I', len(d)) + t + d + struct.pack('>I', c)
+    sig  = b'\x89PNG\r\n\x1a\n'
+    ihdr = chunk(b'IHDR', struct.pack('>IIBBBBB', 1, 1, 8, 2, 0, 0, 0))
+    raw  = b'\x00' + bytes([r, g, b])
+    idat = chunk(b'IDAT', zlib.compress(raw))
+    iend = chunk(b'IEND', b'')
+    return sig + ihdr + idat + iend
+
+data = make_png(255, 10, 10)
+dirs = [
+    'wf/app/src/main/res/mipmap-mdpi-v4',
+    'wf/app/src/main/res/mipmap-hdpi-v4',
+    'wf/app/src/main/res/mipmap-xhdpi-v4',
+    'wf/app/src/main/res/mipmap-xxhdpi-v4',
+    'wf/app/src/main/res/mipmap-xxxhdpi-v4',
+]
+for d in dirs:
+    for name in ('ic_launcher.png', 'ic_launcher_round.png'):
+        with open(os.path.join(d, name), 'wb') as f:
+            f.write(data)
+print("Icons written")
+PYEOF
+
+      - name: Install Gradle wrapper script
+        working-directory: wf
+        run: |
+          gradle wrapper --gradle-version=8.6 2>/dev/null || true
+          if [ ! -f gradlew ]; then
+            curl -fsSL "https://services.gradle.org/distributions/gradle-8.6-bin.zip" -o /tmp/g.zip
+            unzip -q /tmp/g.zip -d /tmp/gradle_inst
+            /tmp/gradle_inst/gradle-8.6/bin/gradle wrapper --gradle-version=8.6
+          fi
+          chmod +x gradlew
+
+      - name: Build unsigned release APK
+        working-directory: wf
+        run: ./gradlew assembleRelease --no-daemon -q
+
+      - name: Sign template APK
+        run: |
+          APK=$(find wf -path "*/release/*.apk" | head -1)
+          echo "Unsigned APK: $APK  ($(du -h "$APK" | cut -f1))"
+
+          sudo apt-get install -y zipalign apksigner 2>/dev/null
+
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/release.keystore
+          zipalign -f 4 "$APK" /tmp/aligned.apk
+          apksigner sign \
+            --ks /tmp/release.keystore \
+            --ks-key-alias "${{ secrets.KEYSTORE_ALIAS }}" \
+            --ks-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
+            --key-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
+            --out /tmp/web2apk_template.apk \
+            /tmp/aligned.apk
+          rm -f /tmp/release.keystore /tmp/aligned.apk
+          apksigner verify /tmp/web2apk_template.apk && echo "Signature OK"
+          echo "Signed APK: $(du -h /tmp/web2apk_template.apk | cut -f1)"
+
+      - name: Publish web2apk-template release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          API="https://api.github.com/repos/$REPO"
+
+          # Remove old release
+          OLD_ID=$(curl -sf -H "Authorization: token $GH_TOKEN" \
+            "$API/releases/tags/web2apk-template" | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*' || true)
+          if [ -n "$OLD_ID" ]; then
+            curl -s -X DELETE -H "Authorization: token $GH_TOKEN" "$API/releases/$OLD_ID"
+            echo "Deleted old release $OLD_ID"
+          fi
+
+          # Remove old tag
+          curl -s -X DELETE -H "Authorization: token $GH_TOKEN" \
+            "$API/git/refs/tags/web2apk-template" || true
+
+          # Create fresh release
+          RELEASE_JSON=$(curl -sf -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/json" \
+            "$API/releases" \
+            -d '{
+              "tag_name":   "web2apk-template",
+              "name":       "WebForge Template",
+              "body":       "Signed base template APK for Taurus Shield WebForge Builder.",
+              "draft":      false,
+              "prerelease": false
+            }')
+
+          RELEASE_ID=$(echo "$RELEASE_JSON" | grep -o '"id":[0-9]*' | head -1 | grep -o '[0-9]*')
+          echo "New release ID: $RELEASE_ID"
+
+          # Upload signed APK
+          UPLOAD_RESULT=$(curl -sf -X POST \
+            -H "Authorization: token $GH_TOKEN" \
+            -H "Content-Type: application/vnd.android.package-archive" \
+            "https://uploads.github.com/repos/$REPO/releases/$RELEASE_ID/assets?name=web2apk_template.apk" \
+            --data-binary @/tmp/web2apk_template.apk)
+
+          echo "$UPLOAD_RESULT" | grep -o '"name":"[^"]*"'
+          echo "Template APK published to web2apk-template release"
