@@ -146,8 +146,8 @@ jobs:
           '        <item name="android:navigationBarColor">@android:color/black</item>\n'
           '    </style>\n</resources>\n')
 
-          # webforge.conf
-          w('wf/app/src/main/assets/webforge.conf',
+          # web2apk.conf
+          w('wf/app/src/main/assets/web2apk.conf',
           '# DO NOT REMOVE\nmainURL = https://example.com\n'
           'requireDoubleBackToExit = true\nallowSubdomains = true\nenableExternalLinks = true\n'
           'openExternalLinksInBrowser = false\nconfirmOpenInBrowser = true\nallowOpenMobileApp = true\n'
@@ -198,7 +198,7 @@ jobs:
 
               private fun loadConf() {
                   try {
-                      assets.open("webforge.conf").bufferedReader().use { r ->
+                      assets.open("web2apk.conf").bufferedReader().use { r ->
                           r.lineSequence()
                               .filter { it.isNotBlank() && !it.trimStart().startsWith("#") }
                               .forEach { line ->
