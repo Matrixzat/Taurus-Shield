@@ -79,7 +79,15 @@ jobs:
               break
           " || echo "Probe skipped"
 
-      - name: Install FFmpeg
+      - name: Cache FFmpeg
+        id: cache-ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: /usr/bin/ffmpeg
+          key: ffmpeg-apt-${{ runner.os }}
+
+      - name: Install FFmpeg (first run only)
+        if: steps.cache-ffmpeg.outputs.cache-hit != 'true'
         run: sudo apt-get install -y ffmpeg
 
       - name: Compress with FFmpeg
