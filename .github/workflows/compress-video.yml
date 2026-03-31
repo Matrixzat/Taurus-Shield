@@ -61,6 +61,9 @@ jobs:
               break
           " || echo "Probe skipped"
 
+      - name: Install FFmpeg
+        run: sudo apt-get install -y ffmpeg
+
       - name: Compress with FFmpeg
         run: |
           CRF="${{ github.event.inputs.crf }}"
