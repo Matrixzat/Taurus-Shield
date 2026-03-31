@@ -37,7 +37,6 @@ jobs:
           curl -s -X DELETE \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" || true
-          echo "Upload slot cleaned up"
 
       - name: Extract PHP files
         run: |
@@ -62,31 +61,22 @@ jobs:
         run: |
           curl -fL "https://github.com/avid0/Alom/archive/refs/heads/main.zip" -o alom.zip
           unzip -q alom.zip
-          ls Alom-main/
           php --version
-
-      - name: Write obfuscation script
-        run: |
-          echo 'PD9waHAKZXJyb3JfcmVwb3J0aW5nKEVfQUxMKTsKaW5pX3NldCgiZGlzcGxheV9lcnJvcnMiLCAiMSIpOwoKJGRlcHRoICAgPSAoaW50KSgkYXJndlsxXSA/PyAyKTsKJHNyY0RpciAgPSBydHJpbSgkYXJndlsyXSwgIi8iKTsKJG91dERpciAgPSBydHJpbSgkYXJndlszXSwgIi8iKTsKJGFsb21EaXIgPSBydHJpbSgkYXJndls0XSwgIi8iKTsKCmVjaG8gImRlcHRoPSRkZXB0aCBzcmNEaXI9JHNyY0RpciBvdXREaXI9JG91dERpciBhbG9tRGlyPSRhbG9tRGlyCiI7CmVjaG8gIlBIUDogIi5QSFBfVkVSU0lPTi4iCiI7CmVjaG8gImFsb210b29sczogIi4oZmlsZV9leGlzdHMoIiRhbG9tRGlyL2Fsb210b29scy5waHAiKSA/ICJ5ZXMiIDogIm5vIikuIgoiOwplY2hvICJhbG9tZW5jb2RlcjogIi4oZmlsZV9leGlzdHMoIiRhbG9tRGlyL2Fsb21lbmNvZGVyLm9iZnMucGhwIikgPyAieWVzIiA6ICJubyIpLiIKIjsKZWNobyBzaGVsbF9leGVjKCJscyAkYWxvbURpciIpOwoKcmVxdWlyZV9vbmNlICIkYWxvbURpci9hbG9tdG9vbHMucGhwIjsKCmVjaG8gIkFsb21FbmNvZGVyIGNsYXNzOiAiLihjbGFzc19leGlzdHMoIkFsb21FbmNvZGVyIikgPyAieWVzIiA6ICJubyIpLiIKIjsKCiRzZXR0aW5ncyA9IFsKICAgICJyb3VuZHMiICAgPT4gWyJtYWluIiA9PiBbImRlcHRoIiA9PiAkZGVwdGhdXSwKICAgICJsaWNlbnNlIiAgPT4gWyJ0eXBlIiA9PiAicmVtb3ZlIl0sCiAgICAiaWRlbnRpZnkiID0+IFtdLApdOwoKZWNobyAiU2Nhbm5pbmcgJHNyY0Rpci4uLgoiOwokaXRlciA9IG5ldyBSZWN1cnNpdmVJdGVyYXRvckl0ZXJhdG9yKAogICAgbmV3IFJlY3Vyc2l2ZURpcmVjdG9yeUl0ZXJhdG9yKCRzcmNEaXIsIEZpbGVzeXN0ZW1JdGVyYXRvcjo6U0tJUF9ET1RTKQopOwokY291bnQgPSAwOyAkZmFpbGVkID0gMDsKZm9yZWFjaCAoJGl0ZXIgYXMgJGZpbGUpIHsKICAgIGlmICghJGZpbGUtPmlzRmlsZSgpKSBjb250aW51ZTsKICAgICRyZWwgPSBzdWJzdHIoJGZpbGUtPmdldFBhdGhuYW1lKCksIHN0cmxlbigkc3JjRGlyKSArIDEpOwogICAgJG91dCA9ICIkb3V0RGlyLyRyZWwiOwogICAgZWNobyAiUHJvY2Vzc2luZzogJHJlbAoiOwogICAgQG1rZGlyKGRpcm5hbWUoJG91dCksIDA3NzcsIHRydWUpOwogICAgaWYgKHN0cnRvbG93ZXIoJGZpbGUtPmdldEV4dGVuc2lvbigpKSA9PT0gInBocCIpIHsKICAgICAgICB0cnkgewogICAgICAgICAgICAkcmVzdWx0ID0gQWxvbUVuY29kZXI6Om9iZnVzY2F0b3IoJGZpbGUtPmdldFBhdGhuYW1lKCksICRzZXR0aW5ncyk7CiAgICAgICAgICAgIGVjaG8gIiAgT0s6ICIuKGlzX3N0cmluZygkcmVzdWx0KSA/IHN0cmxlbigkcmVzdWx0KS4iIGJ5dGVzIiA6IGdldHR5cGUoJHJlc3VsdCkpLiIKIjsKICAgICAgICAgICAgZmlsZV9wdXRfY29udGVudHMoJG91dCwgJHJlc3VsdCk7CiAgICAgICAgICAgICRjb3VudCsrOwogICAgICAgIH0gY2F0Y2ggKFRocm93YWJsZSAkZSkgewogICAgICAgICAgICBlY2hvICIgIEVYQzogIi4kZS0+Z2V0TWVzc2FnZSgpLiIgaW4gIi4kZS0+Z2V0RmlsZSgpLiI6Ii4kZS0+Z2V0TGluZSgpLiIKIjsKICAgICAgICAgICAgJGNvcGllZCA9IGNvcHkoJGZpbGUtPmdldFBhdGhuYW1lKCksICRvdXQpOwogICAgICAgICAgICBlY2hvICIgIGNvcHk6ICIuKCRjb3BpZWQgPyAib2siIDogIkZBSUxFRCIpLiIKIjsKICAgICAgICAgICAgJGZhaWxlZCsrOwogICAgICAgIH0KICAgIH0gZWxzZSB7CiAgICAgICAgY29weSgkZmlsZS0+Z2V0UGF0aG5hbWUoKSwgJG91dCk7CiAgICB9Cn0KZWNobyAiCkRvbmU6ICRjb3VudCBvaywgJGZhaWxlZCBmYWlsZWQKIjsKZWNobyBzaGVsbF9leGVjKCJmaW5kICRvdXREaXIgLXR5cGUgZiIpOw==' | base64 -d > /tmp/run_alom.php
-          echo "Script written — $(wc -l < /tmp/run_alom.php) lines"
 
       - name: Disable XDebug
         run: |
-          echo "=== Loaded PHP ini files ==="
-          php --ini
-          echo "=== Finding xdebug ini files ==="
-          sudo find /etc/php -name '*xdebug*.ini' 2>/dev/null
           sudo find /etc/php -name '*xdebug*.ini' -exec rm -v {} \; 2>/dev/null || true
           sudo phpdismod xdebug 2>/dev/null || true
-          echo "=== Verify XDebug gone ==="
-          php -m | grep -i xdebug || echo "XDebug not loaded — OK"
+          php -m | grep -i xdebug && echo "WARNING: XDebug still loaded" || echo "XDebug disabled OK"
+
+      - name: Write obfuscation script
+        run: |
+          echo 'PD9waHAKJGRlcHRoICAgPSAoaW50KSgkYXJndlsxXSA/PyAyKTsKJHNyY0RpciAgPSBydHJpbSgkYXJndlsyXSwgIi8iKTsKJG91dERpciAgPSBydHJpbSgkYXJndlszXSwgIi8iKTsKJGFsb21EaXIgPSBydHJpbSgkYXJndls0XSwgIi8iKTsKcmVxdWlyZV9vbmNlICIkYWxvbURpci9hbG9tdG9vbHMucGhwIjsKJHNldHRpbmdzID0gWwogICAgInJvdW5kcyIgICA9PiBbIm1haW4iID0+IFsiZGVwdGgiID0+ICRkZXB0aF1dLAogICAgImxpY2Vuc2UiICA9PiBbInR5cGUiID0+ICJyZW1vdmUiXSwKICAgICJpZGVudGlmeSIgPT4gW10sCl07CiRpdGVyID0gbmV3IFJlY3Vyc2l2ZUl0ZXJhdG9ySXRlcmF0b3IoCiAgICBuZXcgUmVjdXJzaXZlRGlyZWN0b3J5SXRlcmF0b3IoJHNyY0RpciwgRmlsZXN5c3RlbUl0ZXJhdG9yOjpTS0lQX0RPVFMpCik7CiRjb3VudCA9IDA7ICRmYWlsZWQgPSAwOwpmb3JlYWNoICgkaXRlciBhcyAkZmlsZSkgewogICAgaWYgKCEkZmlsZS0+aXNGaWxlKCkpIGNvbnRpbnVlOwogICAgJHJlbCA9IHN1YnN0cigkZmlsZS0+Z2V0UGF0aG5hbWUoKSwgc3RybGVuKCRzcmNEaXIpICsgMSk7CiAgICAkb3V0ID0gIiRvdXREaXIvJHJlbCI7CiAgICBAbWtkaXIoZGlybmFtZSgkb3V0KSwgMDc3NywgdHJ1ZSk7CiAgICBpZiAoc3RydG9sb3dlcigkZmlsZS0+Z2V0RXh0ZW5zaW9uKCkpID09PSAicGhwIikgewogICAgICAgIHRyeSB7CiAgICAgICAgICAgIGZpbGVfcHV0X2NvbnRlbnRzKCRvdXQsIEFsb21FbmNvZGVyOjpvYmZ1c2NhdG9yKCRmaWxlLT5nZXRQYXRobmFtZSgpLCAkc2V0dGluZ3MpKTsKICAgICAgICAgICAgZWNobyAiT0s6ICRyZWwKIjsKICAgICAgICAgICAgJGNvdW50Kys7CiAgICAgICAgfSBjYXRjaCAoVGhyb3dhYmxlICRlKSB7CiAgICAgICAgICAgIGNvcHkoJGZpbGUtPmdldFBhdGhuYW1lKCksICRvdXQpOwogICAgICAgICAgICBlY2hvICJGQUlMOiAkcmVsIC0tICIuJGUtPmdldE1lc3NhZ2UoKS4iCiI7CiAgICAgICAgICAgICRmYWlsZWQrKzsKICAgICAgICB9CiAgICB9IGVsc2UgewogICAgICAgIGNvcHkoJGZpbGUtPmdldFBhdGhuYW1lKCksICRvdXQpOwogICAgfQp9CmVjaG8gIgpSZXN1bHQ6ICRjb3VudCBvYmZ1c2NhdGVkLCAkZmFpbGVkIGtlcHQgYXMtaXMKIjs=' | base64 -d > /tmp/run_alom.php
 
       - name: Run Alom obfuscation
         run: |
           mkdir -p php_output
-          php /tmp/run_alom.php "${{ inputs.depth }}" php_input php_output "$(pwd)/Alom-main" 2>&1 | tee /tmp/alom_debug.log
-          echo "=== php_output tree ==="
-          find php_output -type f || echo "(empty)"
+          php /tmp/run_alom.php "${{ inputs.depth }}" php_input php_output "$(pwd)/Alom-main"
 
       - name: Upload obfuscated output
         uses: actions/upload-artifact@v4
@@ -94,12 +84,4 @@ jobs:
           name: php-alom-${{ inputs.job_id }}
           path: php_output/
           if-no-files-found: error
-          retention-days: 1
-
-      - name: Upload debug log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: debug-${{ inputs.job_id }}
-          path: /tmp/alom_debug.log
           retention-days: 1
