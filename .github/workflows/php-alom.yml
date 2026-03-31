@@ -65,48 +65,14 @@ jobs:
           ls Alom-main/
           php --version
 
+      - name: Write obfuscation script
+        run: |
+          echo 'PD9waHAKJGRlcHRoICAgPSAoaW50KSgkYXJndlsxXSA/PyAyKTsKJHNyY0RpciAgPSBydHJpbSgkYXJndlsyXSwgJy8nKTsKJG91dERpciAgPSBydHJpbSgkYXJndlszXSwgJy8nKTsKJGFsb21EaXIgPSBydHJpbSgkYXJndls0XSwgJy8nKTsKCnJlcXVpcmVfb25jZSAiJGFsb21EaXIvYWxvbXRvb2xzLnBocCI7Cgokc2V0dGluZ3MgPSBbCiAgICAncm91bmRzJyAgID0+IFsnbWFpbicgPT4gWydkZXB0aCcgPT4gJGRlcHRoXV0sCiAgICAnbGljZW5zZScgID0+IFsndHlwZScgPT4gJ3JlbW92ZSddLAogICAgJ2lkZW50aWZ5JyA9PiBbXSwKXTsKCiRpdGVyID0gbmV3IFJlY3Vyc2l2ZUl0ZXJhdG9ySXRlcmF0b3IoCiAgICBuZXcgUmVjdXJzaXZlRGlyZWN0b3J5SXRlcmF0b3IoJHNyY0RpciwgRmlsZXN5c3RlbUl0ZXJhdG9yOjpTS0lQX0RPVFMpCik7CiRjb3VudCA9IDA7ICRmYWlsZWQgPSAwOwpmb3JlYWNoICgkaXRlciBhcyAkZmlsZSkgewogICAgaWYgKCEkZmlsZS0+aXNGaWxlKCkpIGNvbnRpbnVlOwogICAgJHJlbCA9IHN1YnN0cigkZmlsZS0+Z2V0UGF0aG5hbWUoKSwgc3RybGVuKCRzcmNEaXIpICsgMSk7CiAgICAkb3V0ID0gIiRvdXREaXIvJHJlbCI7CiAgICBAbWtkaXIoZGlybmFtZSgkb3V0KSwgMDc3NywgdHJ1ZSk7CiAgICBpZiAoc3RydG9sb3dlcigkZmlsZS0+Z2V0RXh0ZW5zaW9uKCkpID09PSAncGhwJykgewogICAgICAgIHRyeSB7CiAgICAgICAgICAgIGZpbGVfcHV0X2NvbnRlbnRzKCRvdXQsIEFsb21FbmNvZGVyOjpvYmZ1c2NhdG9yKCRmaWxlLT5nZXRQYXRobmFtZSgpLCAkc2V0dGluZ3MpKTsKICAgICAgICAgICAgZWNobyAiT0s6ICRyZWwKIjsKICAgICAgICAgICAgJGNvdW50Kys7CiAgICAgICAgfSBjYXRjaCAoVGhyb3dhYmxlICRlKSB7CiAgICAgICAgICAgIGNvcHkoJGZpbGUtPmdldFBhdGhuYW1lKCksICRvdXQpOwogICAgICAgICAgICBlY2hvICJGQUlMOiAkcmVsIC0tICIgLiAkZS0+Z2V0TWVzc2FnZSgpIC4gIgoiOwogICAgICAgICAgICAkZmFpbGVkKys7CiAgICAgICAgfQogICAgfSBlbHNlIHsKICAgICAgICBjb3B5KCRmaWxlLT5nZXRQYXRobmFtZSgpLCAkb3V0KTsKICAgIH0KfQplY2hvICIKUmVzdWx0OiAkY291bnQgb2JmdXNjYXRlZCwgJGZhaWxlZCBrZXB0IGFzLWlzCiI7Cg==' | base64 -d > /tmp/run_alom.php
+          echo "Script written — $(wc -l < /tmp/run_alom.php) lines"
+
       - name: Run Alom obfuscation
         run: |
           mkdir -p php_output
-          cat > /tmp/run_alom.php << 'PHPEOF'
-          <?php
-          $depth   = (int)($argv[1] ?? 2);
-          $srcDir  = rtrim($argv[2], '/');
-          $outDir  = rtrim($argv[3], '/');
-          $alomDir = rtrim($argv[4], '/');
-
-          require_once "$alomDir/alomtools.php";
-
-          $settings = [
-            'rounds'  => ['main' => ['depth' => $depth]],
-            'license' => ['type' => 'remove'],
-          ];
-
-          $iter = new RecursiveIteratorIterator(
-            new RecursiveDirectoryIterator($srcDir, FilesystemIterator::SKIP_DOTS)
-          );
-          $count = 0; $failed = 0;
-          foreach ($iter as $file) {
-            if (!$file->isFile()) continue;
-            $rel = substr($file->getPathname(), strlen($srcDir) + 1);
-            $out = "$outDir/$rel";
-            @mkdir(dirname($out), 0777, true);
-            if (strtolower($file->getExtension()) === 'php') {
-              try {
-                file_put_contents($out, AlomEncoder::obfuscator($file->getPathname(), $settings));
-                echo "OK: $rel\n";
-                $count++;
-              } catch (Throwable $e) {
-                copy($file->getPathname(), $out);
-                echo "FAIL: $rel -- " . $e->getMessage() . "\n";
-                $failed++;
-              }
-            } else {
-              copy($file->getPathname(), $out);
-            }
-          }
-          echo "\nResult: $count obfuscated, $failed kept as-is\n";
-          PHPEOF
           php /tmp/run_alom.php "${{ inputs.depth }}" php_input php_output "$(pwd)/Alom-main"
 
       - name: Upload obfuscated output
