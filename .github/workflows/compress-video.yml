@@ -120,11 +120,18 @@ jobs:
             -movflags +faststart \
             compressed.mp4
 
-          echo "Input:  $(ls -lh input_video)"
-          echo "Output: $(ls -lh compressed.mp4)"
           INPUT_SIZE=$(stat -c%s input_video)
           OUTPUT_SIZE=$(stat -c%s compressed.mp4)
+
+          if [ "$OUTPUT_SIZE" -ge "$INPUT_SIZE" ]; then
+            echo "Output larger than input — keeping original to avoid size increase"
+            cp input_video compressed.mp4
+            OUTPUT_SIZE=$INPUT_SIZE
+          fi
+
           RATIO=$(echo "scale=1; $OUTPUT_SIZE * 100 / $INPUT_SIZE" | bc)
+          echo "Input:  $(ls -lh input_video)"
+          echo "Output: $(ls -lh compressed.mp4)"
           echo "Compression ratio: ${RATIO}% of original"
 
       - name: Upload compressed video artifact
