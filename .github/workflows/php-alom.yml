@@ -1,0 +1,126 @@
+name: PHP Alom Obfuscator
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'Release asset ID of the uploaded PHP ZIP'
+        required: true
+      job_id:
+        description: 'Unique job ID for artifact naming'
+        required: true
+      depth:
+        description: 'Obfuscation depth (1=fast, 2=balanced, 3=strong)'
+        required: false
+        default: '2'
+
+jobs:
+  obfuscate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download uploaded ZIP
+        run: |
+          curl -fL \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
+            -o input.zip
+          ls -lh input.zip
+
+      - name: Delete uploaded asset from release
+        if: always()
+        run: |
+          curl -s -X DELETE \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" || true
+          echo "Upload slot cleaned up"
+
+      - name: Extract PHP files
+        run: |
+          mkdir -p php_input
+          set +e
+          unzip -o input.zip -d php_input
+          UNZIP_RC=$?
+          set -e
+          if [ "$UNZIP_RC" -gt 1 ]; then
+            echo "ERROR: unzip failed with code $UNZIP_RC"
+            exit 1
+          fi
+          PHP_COUNT=$(find php_input -name "*.php" -type f | wc -l)
+          echo "PHP files found: $PHP_COUNT"
+          if [ "$PHP_COUNT" -eq 0 ]; then
+            echo "ERROR: No .php files found in the uploaded ZIP"
+            find php_input -type f | head -20
+            exit 1
+          fi
+
+      - name: Download Alom
+        run: |
+          curl -fL "https://github.com/avid0/Alom/archive/refs/heads/main.zip" -o alom.zip
+          unzip -q alom.zip
+          ls Alom-main/
+          php --version
+
+      - name: Run Alom obfuscation
+        run: |
+          mkdir -p php_output
+          cat > /tmp/run_alom.php << 'PHPEOF'
+          <?php
+          $depth   = (int)($argv[1] ?? 2);
+          $srcDir  = rtrim($argv[2], '/');
+          $outDir  = rtrim($argv[3], '/');
+          $alomDir = rtrim($argv[4], '/');
+
+          require_once "$alomDir/alomtools.php";
+
+          $settings = [
+            'rounds'  => ['main' => ['depth' => $depth]],
+            'license' => ['type' => 'remove'],
+          ];
+
+          $iter = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($srcDir, FilesystemIterator::SKIP_DOTS)
+          );
+          $count = 0; $failed = 0;
+          foreach ($iter as $file) {
+            if (!$file->isFile()) continue;
+            $rel = substr($file->getPathname(), strlen($srcDir) + 1);
+            $out = "$outDir/$rel";
+            @mkdir(dirname($out), 0777, true);
+            if (strtolower($file->getExtension()) === 'php') {
+              try {
+                file_put_contents($out, AlomEncoder::obfuscator($file->getPathname(), $settings));
+                echo "OK: $rel\n";
+                $count++;
+              } catch (Throwable $e) {
+                copy($file->getPathname(), $out);
+                echo "FAIL: $rel -- " . $e->getMessage() . "\n";
+                $failed++;
+              }
+            } else {
+              copy($file->getPathname(), $out);
+            }
+          }
+          echo "\nResult: $count obfuscated, $failed kept as-is\n";
+          PHPEOF
+          php /tmp/run_alom.php "${{ inputs.depth }}" php_input php_output "$(pwd)/Alom-main"
+
+      - name: Upload obfuscated output
+        uses: actions/upload-artifact@v4
+        with:
+          name: php-alom-${{ inputs.job_id }}
+          path: php_output/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload error log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-${{ inputs.job_id }}
+          path: /tmp/run_alom.php
+          retention-days: 1
