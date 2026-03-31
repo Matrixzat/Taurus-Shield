@@ -39,7 +39,7 @@ jobs:
       - name: Locate Flutter project root
         id: locate
         run: |
-          ROOT=$(find project/ -name "pubspec.yaml" | head -1 | xargs dirname)
+          ROOT=$(find project/ -name "pubspec.yaml" | awk -F/ '{print NF, $0}' | sort -n | head -1 | cut -d' ' -f2- | xargs dirname)
           echo "Flutter root: $ROOT"
           echo "flutter_root=$ROOT" >> "$GITHUB_OUTPUT"
 
