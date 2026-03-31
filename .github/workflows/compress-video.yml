@@ -3,8 +3,8 @@ name: Compress Video
 on:
   workflow_dispatch:
     inputs:
-      asset_id:
-        description: 'GitHub release asset ID of the uploaded video file'
+      asset_ids:
+        description: 'Comma-separated GitHub release asset IDs (parallel chunks)'
         required: true
       job_id:
         description: 'Job correlation ID for artifact naming'
@@ -35,18 +35,36 @@ jobs:
       contents: write
 
     steps:
-      - name: Download video from release asset
+      - name: Download and assemble video chunks
         run: |
-          curl -fL \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/octet-stream" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" \
-            -o input_video
-          echo "Downloaded: $(ls -lh input_video)"
-          # Delete upload asset immediately after download
-          curl -fsSL -X DELETE \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" || true
+          IFS=',' read -ra IDS <<< "${{ github.event.inputs.asset_ids }}"
+          echo "Downloading ${#IDS[@]} chunk(s)..."
+          i=0
+          for id in "${IDS[@]}"; do
+            id="${id//[[:space:]]/}"
+            echo "  chunk $i → asset $id"
+            curl -fL \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/octet-stream" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/assets/$id" \
+              -o "chunk_$(printf '%04d' $i)"
+            i=$((i+1))
+          done
+          # Assemble (single chunk = direct rename, multi-chunk = cat)
+          if [ "${#IDS[@]}" -eq 1 ]; then
+            mv chunk_0000 input_video
+          else
+            cat chunk_* > input_video
+            rm -f chunk_*
+          fi
+          echo "Assembled: $(ls -lh input_video)"
+          # Delete all chunk assets immediately
+          for id in "${IDS[@]}"; do
+            id="${id//[[:space:]]/}"
+            curl -fsSL -X DELETE \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/assets/$id" || true
+          done
 
       - name: Probe input
         run: |
