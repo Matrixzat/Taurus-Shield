@@ -43,6 +43,21 @@ jobs:
           echo "Flutter root: $ROOT"
           echo "flutter_root=$ROOT" >> "$GITHUB_OUTPUT"
 
+      - name: Download FFmpegKit native .so libs
+        working-directory: ${{ steps.locate.outputs.flutter_root }}
+        run: |
+          SO_DIR="android/ffmpegkit-local/src/main/jniLibs/arm64-v8a"
+          mkdir -p "$SO_DIR"
+          echo "Downloading FFmpegKit arm64-v8a native libs..."
+          curl -fL \
+            "https://github.com/Matrixzat/Taurus-blutter-api/releases/download/ffmpegkit-libs/ffmpegkit-libs.zip" \
+            -o /tmp/ffmpegkit-libs.zip
+          echo "Downloaded: $(ls -lh /tmp/ffmpegkit-libs.zip)"
+          unzip -q -o /tmp/ffmpegkit-libs.zip -d "$SO_DIR"
+          rm /tmp/ffmpegkit-libs.zip
+          echo "Extracted .so files:"
+          ls -lh "$SO_DIR"
+
       - name: Detect target platform
         id: platform
         working-directory: ${{ steps.locate.outputs.flutter_root }}
