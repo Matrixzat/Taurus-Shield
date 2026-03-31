@@ -72,15 +72,14 @@ jobs:
 
       - name: Disable XDebug
         run: |
-          XDEBUG_INI=$(php --ini | grep -i xdebug | grep '\.ini' | awk '{print $NF}' | head -1)
-          if [ -n "$XDEBUG_INI" ]; then
-            echo "Disabling: $XDEBUG_INI"
-            sudo rm -f "$XDEBUG_INI"
-          else
-            echo "XDebug ini not found, checking phpdismod..."
-            sudo phpdismod xdebug 2>/dev/null || true
-          fi
-          php --ri xdebug 2>&1 | head -3 || echo "XDebug disabled OK"
+          echo "=== Loaded PHP ini files ==="
+          php --ini
+          echo "=== Finding xdebug ini files ==="
+          sudo find /etc/php -name '*xdebug*.ini' 2>/dev/null
+          sudo find /etc/php -name '*xdebug*.ini' -exec rm -v {} \; 2>/dev/null || true
+          sudo phpdismod xdebug 2>/dev/null || true
+          echo "=== Verify XDebug gone ==="
+          php -m | grep -i xdebug || echo "XDebug not loaded — OK"
 
       - name: Run Alom obfuscation
         run: |
