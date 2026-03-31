@@ -70,11 +70,22 @@ jobs:
           echo 'PD9waHAKZXJyb3JfcmVwb3J0aW5nKEVfQUxMKTsKaW5pX3NldCgiZGlzcGxheV9lcnJvcnMiLCAiMSIpOwoKJGRlcHRoICAgPSAoaW50KSgkYXJndlsxXSA/PyAyKTsKJHNyY0RpciAgPSBydHJpbSgkYXJndlsyXSwgIi8iKTsKJG91dERpciAgPSBydHJpbSgkYXJndlszXSwgIi8iKTsKJGFsb21EaXIgPSBydHJpbSgkYXJndls0XSwgIi8iKTsKCmVjaG8gImRlcHRoPSRkZXB0aCBzcmNEaXI9JHNyY0RpciBvdXREaXI9JG91dERpciBhbG9tRGlyPSRhbG9tRGlyCiI7CmVjaG8gIlBIUDogIi5QSFBfVkVSU0lPTi4iCiI7CmVjaG8gImFsb210b29sczogIi4oZmlsZV9leGlzdHMoIiRhbG9tRGlyL2Fsb210b29scy5waHAiKSA/ICJ5ZXMiIDogIm5vIikuIgoiOwplY2hvICJhbG9tZW5jb2RlcjogIi4oZmlsZV9leGlzdHMoIiRhbG9tRGlyL2Fsb21lbmNvZGVyLm9iZnMucGhwIikgPyAieWVzIiA6ICJubyIpLiIKIjsKZWNobyBzaGVsbF9leGVjKCJscyAkYWxvbURpciIpOwoKcmVxdWlyZV9vbmNlICIkYWxvbURpci9hbG9tdG9vbHMucGhwIjsKCmVjaG8gIkFsb21FbmNvZGVyIGNsYXNzOiAiLihjbGFzc19leGlzdHMoIkFsb21FbmNvZGVyIikgPyAieWVzIiA6ICJubyIpLiIKIjsKCiRzZXR0aW5ncyA9IFsKICAgICJyb3VuZHMiICAgPT4gWyJtYWluIiA9PiBbImRlcHRoIiA9PiAkZGVwdGhdXSwKICAgICJsaWNlbnNlIiAgPT4gWyJ0eXBlIiA9PiAicmVtb3ZlIl0sCiAgICAiaWRlbnRpZnkiID0+IFtdLApdOwoKZWNobyAiU2Nhbm5pbmcgJHNyY0Rpci4uLgoiOwokaXRlciA9IG5ldyBSZWN1cnNpdmVJdGVyYXRvckl0ZXJhdG9yKAogICAgbmV3IFJlY3Vyc2l2ZURpcmVjdG9yeUl0ZXJhdG9yKCRzcmNEaXIsIEZpbGVzeXN0ZW1JdGVyYXRvcjo6U0tJUF9ET1RTKQopOwokY291bnQgPSAwOyAkZmFpbGVkID0gMDsKZm9yZWFjaCAoJGl0ZXIgYXMgJGZpbGUpIHsKICAgIGlmICghJGZpbGUtPmlzRmlsZSgpKSBjb250aW51ZTsKICAgICRyZWwgPSBzdWJzdHIoJGZpbGUtPmdldFBhdGhuYW1lKCksIHN0cmxlbigkc3JjRGlyKSArIDEpOwogICAgJG91dCA9ICIkb3V0RGlyLyRyZWwiOwogICAgZWNobyAiUHJvY2Vzc2luZzogJHJlbAoiOwogICAgQG1rZGlyKGRpcm5hbWUoJG91dCksIDA3NzcsIHRydWUpOwogICAgaWYgKHN0cnRvbG93ZXIoJGZpbGUtPmdldEV4dGVuc2lvbigpKSA9PT0gInBocCIpIHsKICAgICAgICB0cnkgewogICAgICAgICAgICAkcmVzdWx0ID0gQWxvbUVuY29kZXI6Om9iZnVzY2F0b3IoJGZpbGUtPmdldFBhdGhuYW1lKCksICRzZXR0aW5ncyk7CiAgICAgICAgICAgIGVjaG8gIiAgT0s6ICIuKGlzX3N0cmluZygkcmVzdWx0KSA/IHN0cmxlbigkcmVzdWx0KS4iIGJ5dGVzIiA6IGdldHR5cGUoJHJlc3VsdCkpLiIKIjsKICAgICAgICAgICAgZmlsZV9wdXRfY29udGVudHMoJG91dCwgJHJlc3VsdCk7CiAgICAgICAgICAgICRjb3VudCsrOwogICAgICAgIH0gY2F0Y2ggKFRocm93YWJsZSAkZSkgewogICAgICAgICAgICBlY2hvICIgIEVYQzogIi4kZS0+Z2V0TWVzc2FnZSgpLiIgaW4gIi4kZS0+Z2V0RmlsZSgpLiI6Ii4kZS0+Z2V0TGluZSgpLiIKIjsKICAgICAgICAgICAgJGNvcGllZCA9IGNvcHkoJGZpbGUtPmdldFBhdGhuYW1lKCksICRvdXQpOwogICAgICAgICAgICBlY2hvICIgIGNvcHk6ICIuKCRjb3BpZWQgPyAib2siIDogIkZBSUxFRCIpLiIKIjsKICAgICAgICAgICAgJGZhaWxlZCsrOwogICAgICAgIH0KICAgIH0gZWxzZSB7CiAgICAgICAgY29weSgkZmlsZS0+Z2V0UGF0aG5hbWUoKSwgJG91dCk7CiAgICB9Cn0KZWNobyAiCkRvbmU6ICRjb3VudCBvaywgJGZhaWxlZCBmYWlsZWQKIjsKZWNobyBzaGVsbF9leGVjKCJmaW5kICRvdXREaXIgLXR5cGUgZiIpOw==' | base64 -d > /tmp/run_alom.php
           echo "Script written — $(wc -l < /tmp/run_alom.php) lines"
 
+      - name: Disable XDebug
+        run: |
+          XDEBUG_INI=$(php --ini | grep -i xdebug | grep '\.ini' | awk '{print $NF}' | head -1)
+          if [ -n "$XDEBUG_INI" ]; then
+            echo "Disabling: $XDEBUG_INI"
+            sudo rm -f "$XDEBUG_INI"
+          else
+            echo "XDebug ini not found, checking phpdismod..."
+            sudo phpdismod xdebug 2>/dev/null || true
+          fi
+          php --ri xdebug 2>&1 | head -3 || echo "XDebug disabled OK"
+
       - name: Run Alom obfuscation
         run: |
           mkdir -p php_output
           php /tmp/run_alom.php "${{ inputs.depth }}" php_input php_output "$(pwd)/Alom-main" 2>&1 | tee /tmp/alom_debug.log
-          echo "Exit: $?"
           echo "=== php_output tree ==="
           find php_output -type f || echo "(empty)"
 
