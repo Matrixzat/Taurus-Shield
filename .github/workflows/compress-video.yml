@@ -1,0 +1,88 @@
+name: Compress Video
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'GitHub release asset ID of the uploaded video file'
+        required: true
+      job_id:
+        description: 'Job correlation ID for artifact naming'
+        required: true
+      crf:
+        description: 'CRF value (20=light 24=standard 28=strong 32=extreme)'
+        required: false
+        default: '24'
+      height:
+        description: 'Target height in px (0 = keep original)'
+        required: false
+        default: '0'
+
+jobs:
+  compress:
+    name: FFmpeg Compress
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download video from release asset
+        run: |
+          curl -fL \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" \
+            -o input_video
+          echo "Downloaded: $(ls -lh input_video)"
+          # Delete upload asset immediately after download
+          curl -fsSL -X DELETE \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" || true
+
+      - name: Probe input
+        run: |
+          ffprobe -v quiet -print_format json -show_streams input_video 2>/dev/null | python3 -c "
+          import json, sys
+          d = json.load(sys.stdin)
+          for s in d.get('streams',[]):
+            if s.get('codec_type') == 'video':
+              print(f'Resolution: {s.get(\"width\")}x{s.get(\"height\")}')
+              print(f'Codec: {s.get(\"codec_name\")}')
+              print(f'Duration: {s.get(\"duration\",\"?\")}s')
+              break
+          " || echo "Probe skipped"
+
+      - name: Compress with FFmpeg
+        run: |
+          CRF="${{ github.event.inputs.crf }}"
+          HEIGHT="${{ github.event.inputs.height }}"
+
+          if [ "$HEIGHT" = "0" ] || [ -z "$HEIGHT" ]; then
+            VF_ARGS=""
+          else
+            VF_ARGS="-vf scale=-2:$HEIGHT"
+          fi
+
+          echo "CRF: $CRF  Height: ${HEIGHT:-original}  VF: ${VF_ARGS:-none}"
+
+          ffmpeg -y -i input_video \
+            -c:v libx264 -crf "$CRF" -preset medium \
+            $VF_ARGS \
+            -c:a aac -b:a 128k \
+            -movflags +faststart \
+            compressed.mp4
+
+          echo "Input:  $(ls -lh input_video)"
+          echo "Output: $(ls -lh compressed.mp4)"
+          INPUT_SIZE=$(stat -c%s input_video)
+          OUTPUT_SIZE=$(stat -c%s compressed.mp4)
+          RATIO=$(echo "scale=1; $OUTPUT_SIZE * 100 / $INPUT_SIZE" | bc)
+          echo "Compression ratio: ${RATIO}% of original"
+
+      - name: Upload compressed video artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: compressed-video-${{ github.event.inputs.job_id }}
+          path: compressed.mp4
+          retention-days: 1
