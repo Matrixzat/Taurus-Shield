@@ -3,14 +3,17 @@ on:
   workflow_dispatch:
     inputs:
       asset_id:
+        description: 'Release asset ID of the uploaded APK or ZIP'
         required: true
       job_id:
+        description: 'Unique job ID for artifact naming'
         required: true
       sign_apk:
+        description: 'Sign the output APK (true/false)'
         required: false
         default: 'true'
 jobs:
-  test:
+  stub:
     runs-on: ubuntu-latest
     steps:
-      - run: echo "ok asset=${{ inputs.asset_id }}"
+      - run: echo "asset=${{ inputs.asset_id }}"
