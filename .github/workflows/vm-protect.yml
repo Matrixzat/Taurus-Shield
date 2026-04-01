@@ -236,13 +236,24 @@ jobs:
           echo "Signed: $(wc -c < vmprotect_output/protected.apk) bytes"
           apksigner verify vmprotect_output/protected.apk && echo "Signature OK" || echo "WARNING: verify failed"
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: vmprotect-${{ inputs.job_id }}
-          path: vmprotect_output/
-          if-no-files-found: error
-          retention-days: 1
+      - name: Upload result to release
+        run: |
+          ASSET_NAME="vmprotect-result-${{ inputs.job_id }}.apk"
+          RELEASE_ID=$(curl -s \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/releases/tags/analyze-queue" \
+            | jq -r '.id')
+          if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
+            echo "ERROR: could not get analyze-queue release ID"
+            exit 1
+          fi
+          echo "Uploading $ASSET_NAME to release $RELEASE_ID..."
+          curl -fX POST \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/vnd.android.package-archive" \
+            "https://uploads.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}/assets?name=${ASSET_NAME}" \
+            --data-binary @vmprotect_output/protected.apk
+          echo "Upload complete."
 
       - name: Upload error log on failure
         if: failure()
