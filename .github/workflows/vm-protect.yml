@@ -353,3 +353,4 @@ RULES
           name: error-${{ inputs.job_id }}
           path: vmprotect_run.log
           retention-days: 1
+
