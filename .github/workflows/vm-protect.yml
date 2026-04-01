@@ -69,9 +69,9 @@ jobs:
         run: |
           sudo apt-get install -y aapt > /dev/null 2>&1 || true
           APK_ABS="$GITHUB_WORKSPACE/$APK_PATH"
-          PKG=$(aapt dump badging "$APK_ABS" 2>/dev/null | grep "^package:" | sed "s/.*name='\([^']*\)'.*/\1/") || true
+          PKG=$(aapt dump badging "$APK_ABS" 2>/dev/null | grep "^package:" | awk -F"'" '{print $2}') || true
           if [ -z "$PKG" ]; then
-            PKG=$(aapt2 dump badging "$APK_ABS" 2>/dev/null | grep "^package:" | sed "s/.*name='\([^']*\)'.*/\1/") || true
+            PKG=$(aapt2 dump badging "$APK_ABS" 2>/dev/null | grep "^package:" | awk -F"'" '{print $2}') || true
           fi
           if [ -z "$PKG" ]; then
             echo "WARNING: could not detect package name"
