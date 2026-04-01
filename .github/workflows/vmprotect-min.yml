@@ -1,0 +1,17 @@
+name: VM Protect Test
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        required: true
+      job_id:
+        required: true
+      sign_apk:
+        required: false
+        default: "true"
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "asset=${{ inputs.asset_id }} job=${{ inputs.job_id }}"
+
