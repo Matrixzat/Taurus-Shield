@@ -118,10 +118,33 @@ jobs:
 
       - name: Set cmake path
         run: |
-          CMAKE_BIN="${{ github.workspace }}/cmake-standalone/bin/cmake"
-          chmod +x "$CMAKE_BIN"
-          echo "CMake : $($CMAKE_BIN --version | head -1)"
-          echo "CMAKE_BIN=$CMAKE_BIN" >> $GITHUB_ENV
+          # nmmp reads CMAKE_PATH as the cmake INSTALL DIR and appends /bin/cmake itself:
+          #   new File(CMAKE_PATH, "/bin/cmake")
+          # If we set CMAKE_PATH to the binary path, Java's File(parent,"/bin/cmake")
+          # treats the child as absolute and resolves to /bin/cmake (snap wrapper → ENOTDIR).
+          # Fix: CMAKE_PATH must be the cmake installation ROOT directory.
+          CMAKE_DIR="${{ github.workspace }}/cmake-standalone"
+          chmod +x "$CMAKE_DIR/bin/cmake"
+          echo "CMake : $($CMAKE_DIR/bin/cmake --version | head -1)"
+
+          # nmmp also expects ninja at CMAKE_PATH/bin/ninja (line 209 of BuildNativeLib.java).
+          # The Kitware tarball does not ship ninja, so copy the system ninja there.
+          if [ ! -f "$CMAKE_DIR/bin/ninja" ]; then
+            NINJA="$(which ninja-build 2>/dev/null || which ninja 2>/dev/null || echo '')"
+            if [ -n "$NINJA" ]; then
+              cp "$NINJA" "$CMAKE_DIR/bin/ninja"
+              chmod +x "$CMAKE_DIR/bin/ninja"
+              echo "Ninja copied from $NINJA → $CMAKE_DIR/bin/ninja"
+            else
+              echo "WARNING: ninja not found on PATH — cmake build may fail"
+            fi
+          fi
+
+          echo "cmake-standalone/bin contents:"
+          ls -lh "$CMAKE_DIR/bin/" | grep -E 'cmake|ninja'
+
+          # Export the DIRECTORY, not the binary
+          echo "CMAKE_BIN=$CMAKE_DIR" >> $GITHUB_ENV
 
       # ── Android NDK r27c ───────────────────────────────────────────────────
       - name: Cache Android NDK r27c
