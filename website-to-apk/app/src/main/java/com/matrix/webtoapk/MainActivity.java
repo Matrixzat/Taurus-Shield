@@ -79,6 +79,9 @@ import org.unifiedpush.android.connector.UnifiedPush;
 
 import kotlin.Unit;
 import kotlin.jvm.functions.Function1;
+import android.view.WindowManager;
+import android.webkit.WebStorage;
+import android.app.PictureInPictureParams;
 
 public class MainActivity extends AppCompatActivity {
     // Corrected permission codes to differentiate between storage and media requests
@@ -155,6 +158,15 @@ public class MainActivity extends AppCompatActivity {
     String biometricType = "both";
     boolean signApk = true;
 
+    // --- New feature flags (patched by make.sh apply_config) ---
+    boolean screenshotPrevention = false;
+    boolean zoomEnabled = false;
+    boolean deepLinkEnabled = false;
+    String deepLinkScheme = "";
+    boolean incognitoOnExit = false;
+    boolean pipEnabled = false;
+    // -----------------------------------------------------------
+
     private BiometricAuthManager biometricAuthManager;
     private View biometricOverlay;
     private View unlockButton;
@@ -164,6 +176,11 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         loadConfig();
+        if (screenshotPrevention) {
+            getWindow().setFlags(
+                WindowManager.LayoutParams.FLAG_SECURE,
+                WindowManager.LayoutParams.FLAG_SECURE);
+        }
         if (forceDarkTheme) {
             AppCompatDelegate.setDefaultNightMode(AppCompatDelegate.MODE_NIGHT_YES);
         }
@@ -283,6 +300,11 @@ swipeRefresh.setOnRefreshListener(() -> {
         webSettings.setSavePassword(SavePassword);
         webSettings.setAllowFileAccess(AllowFileAccess);
         webSettings.setAllowFileAccessFromFileURLs(AllowFileAccessFromFileURLs);
+        webSettings.setSupportZoom(zoomEnabled);
+        webSettings.setBuiltInZoomControls(zoomEnabled);
+        if (zoomEnabled) {
+            webSettings.setDisplayZoomControls(false);
+        }
         webview.setWebContentsDebuggingEnabled(DebugWebView);
         webSettings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW); // Enforce HTTPS
 
@@ -577,6 +599,12 @@ if (savedInstanceState != null) {
                       case "biometricTimeoutMinutes":
                           try { biometricTimeoutMinutes = Integer.parseInt(val); } catch (NumberFormatException ignored) {} break;
                       case "biometricType": if (!val.isEmpty()) biometricType = val; break;
+                      case "screenshotPrevention": screenshotPrevention = "true".equalsIgnoreCase(val); break;
+                      case "zoomEnabled": zoomEnabled = "true".equalsIgnoreCase(val); break;
+                      case "deepLinkEnabled": deepLinkEnabled = "true".equalsIgnoreCase(val); break;
+                      case "deepLinkScheme": if (!val.isEmpty()) deepLinkScheme = val; break;
+                      case "incognitoOnExit": incognitoOnExit = "true".equalsIgnoreCase(val); break;
+                      case "pipEnabled": pipEnabled = "true".equalsIgnoreCase(val); break;
                       default: break;
                   }
               }
@@ -631,6 +659,13 @@ if (savedInstanceState != null) {
 
     @Override
     protected void onDestroy() {
+        if (incognitoOnExit && webview != null) {
+            webview.clearCache(true);
+            webview.clearHistory();
+            CookieManager.getInstance().removeAllCookies(null);
+            CookieManager.getInstance().flush();
+            WebStorage.getInstance().deleteAllData();
+        }
         super.onDestroy();
         if (unifiedPushEndpointReceiver != null) {
             // Unregistering the receiver safely
@@ -1365,6 +1400,19 @@ private String getExtensionFromMimeType(String mimeType) {
 }
 
 @Override
+@Override
+protected void onUserLeaveHint() {
+    super.onUserLeaveHint();
+    if (pipEnabled && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+        try {
+            PictureInPictureParams params = new PictureInPictureParams.Builder().build();
+            enterPictureInPictureMode(params);
+        } catch (Exception e) {
+            Log.e("WebToApk", "PiP not supported on this device", e);
+        }
+    }
+}
+
 protected void onPause() {
     super.onPause();
     if (webview != null) webview.onPause();
