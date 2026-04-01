@@ -74,15 +74,30 @@ jobs:
             PKG=$(aapt2 dump badging "$APK_ABS" 2>/dev/null | grep "^package:" | awk -F"'" '{print $2}') || true
           fi
           if [ -z "$PKG" ]; then
-            echo "WARNING: could not detect package name"
+            echo "WARNING: could not detect package name — protecting all classes"
             echo "RULES_PATH=" >> $GITHUB_ENV
           else
             echo "Detected package: $PKG"
-            RULES_FILE="$GITHUB_WORKSPACE/extracted/rules.txt"
-            printf 'class %s.*\n' "$PKG" > "$RULES_FILE"
-            echo "Generated rules.txt:"
-            cat "$RULES_FILE"
-            echo "RULES_PATH=extracted/rules.txt" >> $GITHUB_ENV
+            # Convert package name to DEX class prefix (dots → slashes)
+            PKG_PATH=$(echo "$PKG" | tr '.' '/')
+            # Count how many classes in the DEX actually start with this prefix.
+            # ProGuard/R8-obfuscated apps rename all classes to short names (a, b, c…)
+            # so the package prefix won't match anything — in that case skip rules and
+            # let nmmp protect ALL classes for maximum coverage.
+            CLASS_COUNT=$(unzip -p "$APK_ABS" classes*.dex 2>/dev/null | \
+              strings | grep -c "^L${PKG_PATH}/" 2>/dev/null || echo 0)
+            echo "Classes matching package prefix: $CLASS_COUNT"
+            if [ "$CLASS_COUNT" -lt 5 ]; then
+              echo "Too few classes match the package prefix (app is likely obfuscated)."
+              echo "Falling back to full protection — no rules.txt."
+              echo "RULES_PATH=" >> $GITHUB_ENV
+            else
+              RULES_FILE="$GITHUB_WORKSPACE/extracted/rules.txt"
+              printf 'class %s.*\n' "$PKG" > "$RULES_FILE"
+              echo "Generated rules.txt (${CLASS_COUNT} matching classes):"
+              cat "$RULES_FILE"
+              echo "RULES_PATH=extracted/rules.txt" >> $GITHUB_ENV
+            fi
           fi
 
       - name: Install system dependencies
