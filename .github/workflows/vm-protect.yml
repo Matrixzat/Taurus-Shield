@@ -24,11 +24,27 @@ jobs:
     steps:
       - name: Download uploaded asset
         run: |
-          curl -fL \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/octet-stream" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
-            -o input_asset
+          MAX=5
+          for i in $(seq 1 $MAX); do
+            echo "Download attempt $i/$MAX..."
+            HTTP=$(curl -sL \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/octet-stream" \
+              -w "%{http_code}" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
+              -o input_asset)
+            if [ "$HTTP" = "200" ] && [ -s input_asset ]; then
+              echo "Download OK (HTTP $HTTP)"
+              break
+            fi
+            echo "Got HTTP $HTTP or empty file — waiting 10s before retry..."
+            rm -f input_asset
+            sleep 10
+            if [ "$i" = "$MAX" ]; then
+              echo "ERROR: asset ${{ inputs.asset_id }} not available after $MAX attempts (last HTTP $HTTP)"
+              exit 1
+            fi
+          done
           ls -lh input_asset
           file input_asset
 
