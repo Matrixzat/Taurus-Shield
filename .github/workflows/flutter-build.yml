@@ -43,7 +43,6 @@ jobs:
           echo "Flutter root: $ROOT"
           echo "flutter_root=$ROOT" >> "$GITHUB_OUTPUT"
 
-
       - name: Detect target platform
         id: platform
         working-directory: ${{ steps.locate.outputs.flutter_root }}
