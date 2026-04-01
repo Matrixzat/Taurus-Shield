@@ -88,11 +88,32 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y \
             openjdk-17-jdk \
-            cmake \
             zipalign apksigner \
             wget unzip 2>/dev/null
           echo "Java  : $(java -version 2>&1 | head -1)"
-          echo "CMake : $(cmake --version | head -1)"
+
+      # ── Standalone cmake (ELF binary — avoids snap/wrapper issues) ─────────
+      - name: Cache cmake binary
+        id: cache-cmake
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/cmake-standalone
+          key: cmake-3.28.3-linux-x86_64
+
+      - name: Download cmake standalone
+        if: steps.cache-cmake.outputs.cache-hit != 'true'
+        run: |
+          wget -q "https://github.com/Kitware/CMake/releases/download/v3.28.3/cmake-3.28.3-linux-x86_64.tar.gz" -O cmake.tar.gz
+          mkdir -p cmake-standalone
+          tar -xzf cmake.tar.gz -C cmake-standalone --strip-components=1
+          rm cmake.tar.gz
+
+      - name: Set cmake path
+        run: |
+          CMAKE_BIN="${{ github.workspace }}/cmake-standalone/bin/cmake"
+          chmod +x "$CMAKE_BIN"
+          echo "CMake : $($CMAKE_BIN --version | head -1)"
+          echo "CMAKE_BIN=$CMAKE_BIN" >> $GITHUB_ENV
 
       # ── Android NDK r27c (cached) ──────────────────────────────────────────
       - name: Cache Android NDK r27c
@@ -174,7 +195,9 @@ jobs:
           echo "Command: $CMD"
           export ANDROID_SDK_HOME
           export ANDROID_NDK_HOME
-          export CMAKE_PATH="$(which cmake)"
+          # Use the standalone cmake ELF binary (avoids snap/wrapper ENOTDIR crash)
+          export CMAKE_PATH="$CMAKE_BIN"
+          echo "CMAKE_PATH=$CMAKE_PATH"
 
           $CMD 2>&1 | tee "$GITHUB_WORKSPACE/vmprotect_run.log"
           exit ${PIPESTATUS[0]}
