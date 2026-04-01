@@ -153,6 +153,7 @@ public class MainActivity extends AppCompatActivity {
     boolean biometricLockEnabled = false;
     int biometricTimeoutMinutes = 5;
     String biometricType = "both";
+    boolean signApk = true;
 
     private BiometricAuthManager biometricAuthManager;
     private View biometricOverlay;
