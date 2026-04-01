@@ -1,0 +1,58 @@
+name: Upload Prebuilt Assets
+
+on:
+  workflow_dispatch:
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download Android NDK r27c
+        run: |
+          echo "Downloading NDK r27c (~800 MB)..."
+          wget -q --show-progress \
+            https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+          ls -lh android-ndk-r27c-linux.zip
+
+      - name: Download cmake 3.28.3
+        run: |
+          echo "Downloading cmake 3.28.3..."
+          wget -q --show-progress \
+            "https://github.com/Kitware/CMake/releases/download/v3.28.3/cmake-3.28.3-linux-x86_64.tar.gz" \
+            -O cmake-3.28.3-linux-x86_64.tar.gz
+          ls -lh cmake-3.28.3-linux-x86_64.tar.gz
+
+      - name: Download vm-protect.jar
+        run: |
+          echo "Downloading vm-protect.jar..."
+          wget -q --show-progress \
+            "https://github.com/maoabc/nmmp/releases/download/last/vm-protect-2023-07-08-0942.jar" \
+            -O vm-protect-2023-07-08-0942.jar
+          ls -lh vm-protect-2023-07-08-0942.jar
+
+      - name: Publish to prebuilt release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Remove old prebuilt release if it exists (clean slate)
+          gh release delete prebuilt \
+            --repo ${{ github.repository }} --yes 2>/dev/null || true
+          git init && git remote add origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git" \
+            2>/dev/null || true
+
+          # Create permanent prebuilt release and upload all assets
+          gh release create prebuilt \
+            --repo ${{ github.repository }} \
+            --title "Prebuilt Assets (VM Protect)" \
+            --notes "Permanent prebuilt assets used by the vm-protect workflow. Do not delete." \
+            --prerelease \
+            android-ndk-r27c-linux.zip \
+            cmake-3.28.3-linux-x86_64.tar.gz \
+            vm-protect-2023-07-08-0942.jar
+
+          echo "All assets uploaded to prebuilt release."
+          gh release view prebuilt --repo ${{ github.repository }}
