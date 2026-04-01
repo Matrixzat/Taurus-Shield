@@ -1,0 +1,355 @@
+name: VM Protect (nmmp)
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'Release asset ID of the uploaded APK or ZIP'
+        required: true
+      job_id:
+        description: 'Unique job ID for artifact naming'
+        required: true
+      sign_apk:
+        description: 'Sign the output APK (true/false)'
+        required: false
+        default: 'true'
+
+jobs:
+  protect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download uploaded asset
+        run: |
+          curl -fL \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
+            -o input_asset
+          ls -lh input_asset
+          file input_asset
+
+      - name: Delete asset from release
+        if: always()
+        run: |
+          curl -s -X DELETE \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" || true
+          echo "Upload slot cleaned."
+
+      # -- Detect input: raw APK or ZIP bundle --------------------------------
+      # Accepted ZIP layouts:
+      #   app.zip/
+      #     \- app.apk              (required)
+      #     \- rules.txt            (optional -- class/method filter)
+      #     \- mapping.txt          (optional -- ProGuard deobfuscation map)
+      #
+      # If no rules.txt -> nmmp defaults to "class *" (protect every method).
+      # mapping.txt is only meaningful when rules.txt is also present.
+      - name: Detect and extract input
+        run: |
+          mkdir -p extracted
+
+          if unzip -t input_asset >/dev/null 2>&1; then
+            echo "Input is a ZIP -- extracting..."
+            set +e; unzip -o input_asset -d extracted; UNZIP_RC=$?; set -e
+            if [ "$UNZIP_RC" -gt 1 ]; then echo "ERROR: unzip failed"; exit 1; fi
+          else
+            echo "Input is a raw APK -- using directly."
+            cp input_asset extracted/input.apk
+          fi
+
+          echo "=== Extracted contents ==="
+          find extracted/ -type f | sort
+
+          APK_PATH=$(find extracted/ -name "*.apk" -type f | head -1)
+          if [ -z "$APK_PATH" ]; then
+            echo "ERROR: No .apk file found in input"
+            exit 1
+          fi
+          echo "APK : $APK_PATH  ($(wc -c < "$APK_PATH") bytes)"
+
+          RULES_PATH=$(find extracted/ -name "rules.txt" -type f | head -1)
+          MAPPING_PATH=$(find extracted/ -name "mapping.txt" -type f | head -1)
+
+          echo "APK_PATH=$APK_PATH"         >> $GITHUB_ENV
+          echo "RULES_PATH=${RULES_PATH:-}" >> $GITHUB_ENV
+          echo "MAPPING_PATH=${MAPPING_PATH:-}" >> $GITHUB_ENV
+
+          echo "rules.txt  : ${RULES_PATH:-(none -- will auto-generate from package name)}"
+          echo "mapping.txt: ${MAPPING_PATH:-(none)}"
+
+      # -- Auto-generate rules.txt if none supplied ---------------------------
+      # When the user uploads just an APK with no rules.txt, protecting ALL
+      # classes (nmmp default) breaks the app because AndroidX, OkHttp, Kotlin
+      # and other library classes are not designed to be nativized -- they crash
+      # with NoSuchMethodError or ClassNotFoundException at runtime.
+      #
+      # Fix: extract the app package name from AndroidManifest.xml and generate
+      # a rules.txt that protects ONLY the app's own package.  Third-party libs
+      # stay untouched as plain DEX bytecode.
+      - name: Auto-generate rules.txt from APK package name
+        if: env.RULES_PATH == ''
+        run: |
+          APK_ABS="$GITHUB_WORKSPACE/$APK_PATH"
+
+          # Decode AndroidManifest.xml from the binary APK using aapt
+          sudo apt-get install -y aapt 2>/dev/null | tail -1
+
+          PKG=$(aapt dump badging "$APK_ABS" 2>/dev/null \
+                | grep "^package:" \
+                | sed "s/.*name='\([^']*\)'.*/\1/")
+
+          if [ -z "$PKG" ]; then
+            # Fallback: try aapt2
+            PKG=$(aapt2 dump badging "$APK_ABS" 2>/dev/null \
+                  | grep "^package:" \
+                  | sed "s/.*name='\([^']*\)'.*/\1/") || true
+          fi
+
+          if [ -z "$PKG" ]; then
+            echo "WARNING: could not detect package name -- falling back to protecting all classes"
+            echo "RULES_PATH=" >> $GITHUB_ENV
+          else
+            echo "Detected package: $PKG"
+
+            # Build a rules.txt that protects only the app's own classes.
+            # Excludes: android.*, androidx.*, com.google.*, kotlin.*, okhttp3.*,
+            #           com.facebook.*, io.flutter.*, and any other known library roots.
+            RULES_FILE="$GITHUB_WORKSPACE/extracted/rules.txt"
+            cat > "$RULES_FILE" << RULES
+# Auto-generated by Taurus Shield VM Protect
+# Only protect the app's own package -- leave all library classes as DEX.
+class ${PKG}.*
+RULES
+
+            echo "Generated rules.txt:"
+            cat "$RULES_FILE"
+            echo "RULES_PATH=extracted/rules.txt" >> $GITHUB_ENV
+          fi
+
+      # -- System dependencies ------------------------------------------------
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            openjdk-17-jdk \
+            zipalign apksigner \
+            wget unzip 2>/dev/null
+          echo "Java  : $(java -version 2>&1 | head -1)"
+
+      # -- Prebuilt asset base URL --------------------------------------------
+      # All heavy binaries live in the permanent `prebuilt` release of this repo.
+      # Run the `Upload Prebuilt Assets` workflow once to populate it.
+      # Release assets never expire -- no 7-day eviction like Actions cache.
+      # Actions cache is kept as an L1 layer to skip the download on warm runners.
+
+      # -- cmake 3.28.3 (standalone ELF -- avoids snap/wrapper ENOTDIR crash) --
+      - name: Cache cmake binary
+        id: cache-cmake
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/cmake-standalone
+          key: cmake-3.28.3-linux-x86_64
+
+      - name: Download cmake from prebuilt release
+        if: steps.cache-cmake.outputs.cache-hit != 'true'
+        run: |
+          wget -q \
+            "https://github.com/${{ github.repository }}/releases/download/prebuilt/cmake-3.28.3-linux-x86_64.tar.gz" \
+            -O cmake.tar.gz
+          mkdir -p cmake-standalone
+          tar -xzf cmake.tar.gz -C cmake-standalone --strip-components=1
+          rm cmake.tar.gz
+
+      - name: Set cmake path
+        run: |
+          # nmmp reads CMAKE_PATH as the cmake INSTALL DIR and appends /bin/cmake itself:
+          #   new File(CMAKE_PATH, "/bin/cmake")
+          # If we set CMAKE_PATH to the binary path, Java's File(parent,"/bin/cmake")
+          # treats the child as absolute and resolves to /bin/cmake (snap wrapper -> ENOTDIR).
+          # Fix: CMAKE_PATH must be the cmake installation ROOT directory.
+          CMAKE_DIR="${{ github.workspace }}/cmake-standalone"
+          chmod +x "$CMAKE_DIR/bin/cmake"
+          echo "CMake : $($CMAKE_DIR/bin/cmake --version | head -1)"
+
+          # nmmp also expects ninja at CMAKE_PATH/bin/ninja (line 209 of BuildNativeLib.java).
+          # The Kitware tarball does not ship ninja, so copy the system ninja there.
+          if [ ! -f "$CMAKE_DIR/bin/ninja" ]; then
+            NINJA="$(which ninja-build 2>/dev/null || which ninja 2>/dev/null || echo '')"
+            if [ -n "$NINJA" ]; then
+              cp "$NINJA" "$CMAKE_DIR/bin/ninja"
+              chmod +x "$CMAKE_DIR/bin/ninja"
+              echo "Ninja copied from $NINJA -> $CMAKE_DIR/bin/ninja"
+            else
+              echo "WARNING: ninja not found on PATH -- cmake build may fail"
+            fi
+          fi
+
+          echo "cmake-standalone/bin contents:"
+          ls -lh "$CMAKE_DIR/bin/" | grep -E 'cmake|ninja'
+
+          # Export the DIRECTORY, not the binary
+          echo "CMAKE_BIN=$CMAKE_DIR" >> $GITHUB_ENV
+
+      # -- Android NDK r27c ---------------------------------------------------
+      - name: Cache Android NDK r27c
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/android-ndk-r27c
+          key: android-ndk-r27c-linux
+
+      - name: Download NDK from prebuilt release
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
+        run: |
+          wget -q \
+            "https://github.com/${{ github.repository }}/releases/download/prebuilt/android-ndk-r27c-linux.zip"
+          unzip -q android-ndk-r27c-linux.zip
+          rm    android-ndk-r27c-linux.zip
+
+      - name: Set NDK path
+        run: |
+          NDK_DIR="${{ github.workspace }}/android-ndk-r27c"
+          echo "NDK ready: $NDK_DIR  (cache-hit: ${{ steps.cache-ndk.outputs.cache-hit }})"
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> $GITHUB_ENV
+
+      # -- Android SDK (use runner's built-in, or stub) -----------------------
+      - name: Resolve Android SDK path
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          [ -d "$SDK" ] && echo "SDK found at $SDK" || { mkdir -p sdk_stub; SDK="$(pwd)/sdk_stub"; echo "Using stub SDK at $SDK"; }
+          echo "ANDROID_SDK_HOME=$SDK" >> $GITHUB_ENV
+
+      # -- vm-protect.jar -----------------------------------------------------
+      - name: Cache vm-protect.jar
+        id: cache-jar
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/vm-protect.jar
+          key: vm-protect-jar-2023-07-08-0942
+
+      - name: Download vm-protect.jar from prebuilt release
+        if: steps.cache-jar.outputs.cache-hit != 'true'
+        run: |
+          wget -q \
+            "https://github.com/${{ github.repository }}/releases/download/prebuilt/vm-protect-2023-07-08-0942.jar" \
+            -O vm-protect.jar
+          ls -lh vm-protect.jar
+
+      # -- Run protection -----------------------------------------------------
+      #
+      # CLI: java -jar vm-protect.jar apk <input.apk> [rules.txt [mapping.txt]]
+      #
+      # rules.txt format examples
+      # -------------------------
+      #   class *                          -> protect every class (default)
+      #   class com.example.MyClass        -> one specific class
+      #   class com.example.*              -> all classes in package
+      #   class * extends android.app.Activity
+      #   class * implements java.io.Serializable
+      #   class com.example.* { encrypt*; } -> only matching methods
+      #
+      # mapping.txt: standard ProGuard/R8 mapping output file.
+      #   Supply this when the APK was minified so nmmp can map obfuscated
+      #   class names back to their originals when applying rules.txt.
+      - name: Run VM Protect
+        run: |
+          APK_ABS="$GITHUB_WORKSPACE/$APK_PATH"
+          JAR="$GITHUB_WORKSPACE/vm-protect.jar"
+
+          CMD="java -jar $JAR apk $APK_ABS"
+
+          if [ -n "$RULES_PATH" ]; then
+            CMD="$CMD $GITHUB_WORKSPACE/$RULES_PATH"
+            echo "Using rules.txt: $RULES_PATH"
+            if [ -n "$MAPPING_PATH" ]; then
+              CMD="$CMD $GITHUB_WORKSPACE/$MAPPING_PATH"
+              echo "Using mapping.txt: $MAPPING_PATH"
+            fi
+          else
+            echo "No rules.txt supplied -- protecting ALL classes (default: class *)"
+          fi
+
+          echo "Command: $CMD"
+          export ANDROID_SDK_HOME
+          export ANDROID_NDK_HOME
+          # Use the standalone cmake ELF binary (avoids snap/wrapper ENOTDIR crash)
+          export CMAKE_PATH="$CMAKE_BIN"
+          echo "CMAKE_PATH=$CMAKE_PATH"
+
+          $CMD 2>&1 | tee "$GITHUB_WORKSPACE/vmprotect_run.log"
+          exit ${PIPESTATUS[0]}
+        timeout-minutes: 50
+
+      # -- Collect output APK -------------------------------------------------
+      - name: Collect output
+        run: |
+          mkdir -p vmprotect_output
+
+          APK_DIR=$(dirname "$GITHUB_WORKSPACE/$APK_PATH")
+          PROTECT_APK=$(find "$APK_DIR/build" -name "*protect*.apk" -type f 2>/dev/null | head -1)
+          [ -z "$PROTECT_APK" ] && \
+            PROTECT_APK=$(find . -name "*protect*.apk" -type f | head -1)
+
+          if [ -z "$PROTECT_APK" ]; then
+            echo "ERROR: protected APK not found in output"
+            find . -name "*.apk" | head -20
+            exit 1
+          fi
+
+          cp "$PROTECT_APK" vmprotect_output/protected.apk
+          echo "Protected APK: $(wc -c < vmprotect_output/protected.apk) bytes"
+
+          echo "=== Output ==="
+          find vmprotect_output/ -type f | sort
+
+      # -- Sign ---------------------------------------------------------------
+      - name: Sign APK
+        if: inputs.sign_apk == 'true'
+        run: |
+          if [ ! -f vmprotect_output/protected.apk ]; then
+            echo "No APK to sign -- skipping"
+            exit 0
+          fi
+
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/release.keystore
+
+          zipalign -f 4 \
+            vmprotect_output/protected.apk \
+            vmprotect_output/protected_aligned.apk
+
+          apksigner sign \
+            --ks /tmp/release.keystore \
+            --ks-key-alias "${{ secrets.KEYSTORE_ALIAS }}" \
+            --ks-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
+            --key-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
+            --out vmprotect_output/protected_signed.apk \
+            vmprotect_output/protected_aligned.apk
+
+          mv vmprotect_output/protected_signed.apk vmprotect_output/protected.apk
+          rm -f vmprotect_output/protected_aligned.apk /tmp/release.keystore
+
+          echo "Signed: $(wc -c < vmprotect_output/protected.apk) bytes"
+          apksigner verify vmprotect_output/protected.apk \
+            && echo "Signature OK" || echo "WARNING: signature verification failed"
+
+      # -- Upload artifact ----------------------------------------------------
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vmprotect-${{ inputs.job_id }}
+          path: vmprotect_output/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload error log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-${{ inputs.job_id }}
+          path: vmprotect_run.log
+          retention-days: 1
