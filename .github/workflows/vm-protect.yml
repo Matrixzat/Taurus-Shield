@@ -94,14 +94,25 @@ jobs:
           echo "Java  : $(java -version 2>&1 | head -1)"
           echo "CMake : $(cmake --version | head -1)"
 
-      # ── Android NDK r27c ───────────────────────────────────────────────────
+      # ── Android NDK r27c (cached) ──────────────────────────────────────────
+      - name: Cache Android NDK r27c
+        id: cache-ndk
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/android-ndk-r27c
+          key: android-ndk-r27c-linux
+
       - name: Download Android NDK r27c
+        if: steps.cache-ndk.outputs.cache-hit != 'true'
         run: |
           wget -q https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
           unzip -q android-ndk-r27c-linux.zip
           rm    android-ndk-r27c-linux.zip
-          NDK_DIR="$(pwd)/android-ndk-r27c"
-          echo "NDK ready: $NDK_DIR"
+
+      - name: Set NDK path
+        run: |
+          NDK_DIR="${{ github.workspace }}/android-ndk-r27c"
+          echo "NDK ready: $NDK_DIR  (cache-hit: ${{ steps.cache-ndk.outputs.cache-hit }})"
           echo "ANDROID_NDK_HOME=$NDK_DIR" >> $GITHUB_ENV
 
       # ── Android SDK (use runner's built-in, or stub) ───────────────────────
@@ -111,9 +122,16 @@ jobs:
           [ -d "$SDK" ] && echo "SDK found at $SDK" || { mkdir -p sdk_stub; SDK="$(pwd)/sdk_stub"; echo "Using stub SDK at $SDK"; }
           echo "ANDROID_SDK_HOME=$SDK" >> $GITHUB_ENV
 
-      # ── vm-protect.jar ─────────────────────────────────────────────────────
-      # Pre-built release JAR from https://github.com/maoabc/nmmp
+      # ── vm-protect.jar (cached) ────────────────────────────────────────────
+      - name: Cache vm-protect.jar
+        id: cache-jar
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/vm-protect.jar
+          key: vm-protect-jar-2023-07-08-0942
+
       - name: Download vm-protect.jar
+        if: steps.cache-jar.outputs.cache-hit != 'true'
         run: |
           wget -q -O vm-protect.jar \
             "https://github.com/maoabc/nmmp/releases/download/last/vm-protect-2023-07-08-0942.jar"
