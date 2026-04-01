@@ -1,0 +1,232 @@
+name: VM Protect (nmmp)
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'Release asset ID of the uploaded APK or ZIP'
+        required: true
+      job_id:
+        description: 'Unique job ID for artifact naming'
+        required: true
+      sign_apk:
+        description: 'Sign the output APK (true/false)'
+        required: false
+        default: 'true'
+
+jobs:
+  protect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download uploaded asset
+        run: |
+          curl -fL \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
+            -o input_asset
+          ls -lh input_asset
+          file input_asset
+
+      - name: Delete asset from release
+        if: always()
+        run: |
+          curl -s -X DELETE \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" || true
+          echo "Upload slot cleaned."
+
+      # ── Detect input: raw APK or ZIP bundle ────────────────────────────────
+      # Accepted ZIP layouts:
+      #   app.zip/
+      #     └─ app.apk              (required)
+      #     └─ rules.txt            (optional — class/method filter)
+      #     └─ mapping.txt          (optional — ProGuard deobfuscation map)
+      #
+      # If no rules.txt → nmmp defaults to "class *" (protect every method).
+      # mapping.txt is only meaningful when rules.txt is also present.
+      - name: Detect and extract input
+        run: |
+          mkdir -p extracted
+
+          if unzip -t input_asset >/dev/null 2>&1; then
+            echo "Input is a ZIP — extracting..."
+            set +e; unzip -o input_asset -d extracted; UNZIP_RC=$?; set -e
+            if [ "$UNZIP_RC" -gt 1 ]; then echo "ERROR: unzip failed"; exit 1; fi
+          else
+            echo "Input is a raw APK — using directly."
+            cp input_asset extracted/input.apk
+          fi
+
+          echo "=== Extracted contents ==="
+          find extracted/ -type f | sort
+
+          APK_PATH=$(find extracted/ -name "*.apk" -type f | head -1)
+          if [ -z "$APK_PATH" ]; then
+            echo "ERROR: No .apk file found in input"
+            exit 1
+          fi
+          echo "APK : $APK_PATH  ($(wc -c < "$APK_PATH") bytes)"
+
+          RULES_PATH=$(find extracted/ -name "rules.txt" -type f | head -1)
+          MAPPING_PATH=$(find extracted/ -name "mapping.txt" -type f | head -1)
+
+          echo "APK_PATH=$APK_PATH"         >> $GITHUB_ENV
+          echo "RULES_PATH=${RULES_PATH:-}" >> $GITHUB_ENV
+          echo "MAPPING_PATH=${MAPPING_PATH:-}" >> $GITHUB_ENV
+
+          echo "rules.txt  : ${RULES_PATH:-(none — will protect ALL classes)}"
+          echo "mapping.txt: ${MAPPING_PATH:-(none)}"
+
+      # ── System dependencies ────────────────────────────────────────────────
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            openjdk-17-jdk \
+            cmake \
+            zipalign apksigner \
+            wget unzip 2>/dev/null
+          echo "Java  : $(java -version 2>&1 | head -1)"
+          echo "CMake : $(cmake --version | head -1)"
+
+      # ── Android NDK r27c ───────────────────────────────────────────────────
+      - name: Download Android NDK r27c
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+          unzip -q android-ndk-r27c-linux.zip
+          rm    android-ndk-r27c-linux.zip
+          NDK_DIR="$(pwd)/android-ndk-r27c"
+          echo "NDK ready: $NDK_DIR"
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> $GITHUB_ENV
+
+      # ── Android SDK (use runner's built-in, or stub) ───────────────────────
+      - name: Resolve Android SDK path
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          [ -d "$SDK" ] && echo "SDK found at $SDK" || { mkdir -p sdk_stub; SDK="$(pwd)/sdk_stub"; echo "Using stub SDK at $SDK"; }
+          echo "ANDROID_SDK_HOME=$SDK" >> $GITHUB_ENV
+
+      # ── vm-protect.jar ─────────────────────────────────────────────────────
+      # Pre-built release JAR from https://github.com/maoabc/nmmp
+      - name: Download vm-protect.jar
+        run: |
+          wget -q -O vm-protect.jar \
+            "https://github.com/maoabc/nmmp/releases/download/last/vm-protect-2023-07-08-0942.jar"
+          ls -lh vm-protect.jar
+
+      # ── Run protection ─────────────────────────────────────────────────────
+      #
+      # CLI: java -jar vm-protect.jar apk <input.apk> [rules.txt [mapping.txt]]
+      #
+      # rules.txt format examples
+      # ─────────────────────────
+      #   class *                          → protect every class (default)
+      #   class com.example.MyClass        → one specific class
+      #   class com.example.*              → all classes in package
+      #   class * extends android.app.Activity
+      #   class * implements java.io.Serializable
+      #   class com.example.* { encrypt*; } → only matching methods
+      #
+      # mapping.txt: standard ProGuard/R8 mapping output file.
+      #   Supply this when the APK was minified so nmmp can map obfuscated
+      #   class names back to their originals when applying rules.txt.
+      - name: Run VM Protect
+        run: |
+          APK_ABS="$GITHUB_WORKSPACE/$APK_PATH"
+          JAR="$GITHUB_WORKSPACE/vm-protect.jar"
+
+          CMD="java -jar $JAR apk $APK_ABS"
+
+          if [ -n "$RULES_PATH" ]; then
+            CMD="$CMD $GITHUB_WORKSPACE/$RULES_PATH"
+            echo "Using rules.txt: $RULES_PATH"
+            if [ -n "$MAPPING_PATH" ]; then
+              CMD="$CMD $GITHUB_WORKSPACE/$MAPPING_PATH"
+              echo "Using mapping.txt: $MAPPING_PATH"
+            fi
+          else
+            echo "No rules.txt supplied — protecting ALL classes (default: class *)"
+          fi
+
+          echo "Command: $CMD"
+          export ANDROID_SDK_HOME
+          export ANDROID_NDK_HOME
+          export CMAKE_PATH="$(which cmake)"
+
+          $CMD 2>&1 | tee "$GITHUB_WORKSPACE/vmprotect_run.log"
+          exit ${PIPESTATUS[0]}
+        timeout-minutes: 50
+
+      # ── Collect output APK ─────────────────────────────────────────────────
+      - name: Collect output
+        run: |
+          mkdir -p vmprotect_output
+
+          APK_DIR=$(dirname "$GITHUB_WORKSPACE/$APK_PATH")
+          PROTECT_APK=$(find "$APK_DIR/build" -name "*protect*.apk" -type f 2>/dev/null | head -1)
+          [ -z "$PROTECT_APK" ] && \
+            PROTECT_APK=$(find . -name "*protect*.apk" -type f | head -1)
+
+          if [ -z "$PROTECT_APK" ]; then
+            echo "ERROR: protected APK not found in output"
+            find . -name "*.apk" | head -20
+            exit 1
+          fi
+
+          cp "$PROTECT_APK" vmprotect_output/protected.apk
+          echo "Protected APK: $(wc -c < vmprotect_output/protected.apk) bytes"
+
+          echo "=== Output ==="
+          find vmprotect_output/ -type f | sort
+
+      # ── Sign ───────────────────────────────────────────────────────────────
+      - name: Sign APK
+        if: inputs.sign_apk == 'true'
+        run: |
+          if [ ! -f vmprotect_output/protected.apk ]; then
+            echo "No APK to sign — skipping"
+            exit 0
+          fi
+
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/release.keystore
+
+          zipalign -f 4 \
+            vmprotect_output/protected.apk \
+            vmprotect_output/protected_aligned.apk
+
+          apksigner sign \
+            --ks /tmp/release.keystore \
+            --ks-key-alias "${{ secrets.KEYSTORE_ALIAS }}" \
+            --ks-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
+            --key-pass "pass:${{ secrets.KEYSTORE_PASSWORD }}" \
+            --out vmprotect_output/protected_signed.apk \
+            vmprotect_output/protected_aligned.apk
+
+          mv vmprotect_output/protected_signed.apk vmprotect_output/protected.apk
+          rm -f vmprotect_output/protected_aligned.apk /tmp/release.keystore
+
+          echo "Signed: $(wc -c < vmprotect_output/protected.apk) bytes"
+          apksigner verify vmprotect_output/protected.apk \
+            && echo "Signature OK" || echo "WARNING: signature verification failed"
+
+      # ── Upload artifact ────────────────────────────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vmprotect-${{ inputs.job_id }}
+          path: vmprotect_output/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload error log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-${{ inputs.job_id }}
+          path: vmprotect_run.log
+          retention-days: 1
