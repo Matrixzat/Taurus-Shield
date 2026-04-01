@@ -55,6 +55,40 @@ try() {
 }
 
 
+set_deep_link_scheme() {
+    local manifest_file="app/src/main/AndroidManifest.xml"
+    local scheme="$1"
+    local tmp_file
+    tmp_file=$(mktemp)
+
+    # Remove any existing custom-scheme intent-filter block we may have added
+    awk '
+        BEGIN { skip=0 }
+        /<!-- CUSTOM_SCHEME_DEEPLINK_START -->/ { skip=1 }
+        /<!-- CUSTOM_SCHEME_DEEPLINK_END -->/ { skip=0; next }
+        !skip { print }
+    ' "$manifest_file" > "$tmp_file" && mv "$tmp_file" "$manifest_file"
+
+    if [ -n "$scheme" ]; then
+        tmp_file=$(mktemp)
+        awk -v scheme="$scheme" '
+            /</activity>/ && !inserted {
+                print "            <!-- CUSTOM_SCHEME_DEEPLINK_START -->"
+                print "            <intent-filter>"
+                print "                <action android:name="android.intent.action.VIEW" />"
+                print "                <category android:name="android.intent.category.DEFAULT" />"
+                print "                <category android:name="android.intent.category.BROWSABLE" />"
+                print "                <data android:scheme="" scheme "" />"
+                print "            </intent-filter>"
+                print "            <!-- CUSTOM_SCHEME_DEEPLINK_END -->"
+                inserted=1
+            }
+            { print }
+        ' "$manifest_file" > "$tmp_file" && mv "$tmp_file" "$manifest_file"
+        log "Custom deep link scheme set: $scheme://"
+    fi
+}
+
 set_var() {
     local java_file
     java_file=$(find app/src/main/java -name "MainActivity.java" -type f 2>/dev/null | head -n1)
@@ -160,6 +194,8 @@ apply_config() {
     echo "[DEBUG] Icon lines in config:" >&2
     grep -i "icon" "$config_file" >&2 || echo "[DEBUG] No icon lines found" >&2
     
+    local deepLinkScheme=""
+    local deepLinkEnabled="false"
     while IFS='=' read -r key value || [ -n "$key" ]; do
         # Skip empty lines and comments
         [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
@@ -192,11 +228,31 @@ apply_config() {
             "scripts")
                 set_userscripts $value
                 ;;
+            "versionCode")
+                # Patch build.gradle directly for versionCode
+                sed -i "s/versionCode [0-9]*/versionCode $value/" app/build.gradle
+                ;;
+            "versionName")
+                # Patch build.gradle directly for versionName
+                sed -i "s/versionName \"[^\"]*/versionName \"$value/" app/build.gradle
+                ;;
+            "deepLinkScheme")
+                # Store scheme; applied after deepLinkEnabled is processed
+                deepLinkScheme="$value"
+                ;;
+            "deepLinkEnabled")
+                deepLinkEnabled="$value"
+                ;;
             *)
                 set_var "$key = $value"
                 ;;
         esac
     done < <(sed -e '/^[[:space:]]*#/d' -e 's/[[:space:]]+#.*//' "$config_file")
+
+    # Apply custom deep link scheme if enabled and scheme are both set
+    if [ "$deepLinkEnabled" = "true" ] && [ -n "$deepLinkScheme" ]; then
+        set_deep_link_scheme "$deepLinkScheme"
+    fi
 
     # --- PATCH START: Force enable geolocation by default ---
     set_var "geolocationEnabled = true"
