@@ -43,7 +43,7 @@ jobs:
       - name: Detect and extract input
         run: |
           mkdir -p extracted
-          if unzip -l input_asset 2>/dev/null | grep -q "\.apk$"; then
+          if unzip -l input_asset 2>/dev/null | awk '{print $4}' | grep -v "/" | grep -q "\.apk$"; then
             echo "Input is a ZIP bundle containing an APK"
             unzip -o input_asset -d extracted || true
           else
