@@ -92,7 +92,13 @@ jobs:
             wget unzip 2>/dev/null
           echo "Java  : $(java -version 2>&1 | head -1)"
 
-      # ── Standalone cmake (ELF binary — avoids snap/wrapper issues) ─────────
+      # ── Prebuilt asset base URL ────────────────────────────────────────────
+      # All heavy binaries live in the permanent `prebuilt` release of this repo.
+      # Run the `Upload Prebuilt Assets` workflow once to populate it.
+      # Release assets never expire — no 7-day eviction like Actions cache.
+      # Actions cache is kept as an L1 layer to skip the download on warm runners.
+
+      # ── cmake 3.28.3 (standalone ELF — avoids snap/wrapper ENOTDIR crash) ──
       - name: Cache cmake binary
         id: cache-cmake
         uses: actions/cache@v4
@@ -100,10 +106,12 @@ jobs:
           path: ${{ github.workspace }}/cmake-standalone
           key: cmake-3.28.3-linux-x86_64
 
-      - name: Download cmake standalone
+      - name: Download cmake from prebuilt release
         if: steps.cache-cmake.outputs.cache-hit != 'true'
         run: |
-          wget -q "https://github.com/Kitware/CMake/releases/download/v3.28.3/cmake-3.28.3-linux-x86_64.tar.gz" -O cmake.tar.gz
+          wget -q \
+            "https://github.com/${{ github.repository }}/releases/download/prebuilt/cmake-3.28.3-linux-x86_64.tar.gz" \
+            -O cmake.tar.gz
           mkdir -p cmake-standalone
           tar -xzf cmake.tar.gz -C cmake-standalone --strip-components=1
           rm cmake.tar.gz
@@ -115,7 +123,7 @@ jobs:
           echo "CMake : $($CMAKE_BIN --version | head -1)"
           echo "CMAKE_BIN=$CMAKE_BIN" >> $GITHUB_ENV
 
-      # ── Android NDK r27c (cached) ──────────────────────────────────────────
+      # ── Android NDK r27c ───────────────────────────────────────────────────
       - name: Cache Android NDK r27c
         id: cache-ndk
         uses: actions/cache@v4
@@ -123,10 +131,11 @@ jobs:
           path: ${{ github.workspace }}/android-ndk-r27c
           key: android-ndk-r27c-linux
 
-      - name: Download Android NDK r27c
+      - name: Download NDK from prebuilt release
         if: steps.cache-ndk.outputs.cache-hit != 'true'
         run: |
-          wget -q https://dl.google.com/android/repository/android-ndk-r27c-linux.zip
+          wget -q \
+            "https://github.com/${{ github.repository }}/releases/download/prebuilt/android-ndk-r27c-linux.zip"
           unzip -q android-ndk-r27c-linux.zip
           rm    android-ndk-r27c-linux.zip
 
@@ -143,7 +152,7 @@ jobs:
           [ -d "$SDK" ] && echo "SDK found at $SDK" || { mkdir -p sdk_stub; SDK="$(pwd)/sdk_stub"; echo "Using stub SDK at $SDK"; }
           echo "ANDROID_SDK_HOME=$SDK" >> $GITHUB_ENV
 
-      # ── vm-protect.jar (cached) ────────────────────────────────────────────
+      # ── vm-protect.jar ─────────────────────────────────────────────────────
       - name: Cache vm-protect.jar
         id: cache-jar
         uses: actions/cache@v4
@@ -151,11 +160,12 @@ jobs:
           path: ${{ github.workspace }}/vm-protect.jar
           key: vm-protect-jar-2023-07-08-0942
 
-      - name: Download vm-protect.jar
+      - name: Download vm-protect.jar from prebuilt release
         if: steps.cache-jar.outputs.cache-hit != 'true'
         run: |
-          wget -q -O vm-protect.jar \
-            "https://github.com/maoabc/nmmp/releases/download/last/vm-protect-2023-07-08-0942.jar"
+          wget -q \
+            "https://github.com/${{ github.repository }}/releases/download/prebuilt/vm-protect-2023-07-08-0942.jar" \
+            -O vm-protect.jar
           ls -lh vm-protect.jar
 
       # ── Run protection ─────────────────────────────────────────────────────
