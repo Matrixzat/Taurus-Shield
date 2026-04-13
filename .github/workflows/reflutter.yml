@@ -43,7 +43,9 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" || true
 
       - name: Install reflutter
-        run: pip3 install reflutter --quiet
+        run: |
+          pip3 install reflutter --quiet
+          echo "ReFlutter version: $(pip3 show reflutter | grep Version)"
 
       - name: Run reflutter
         timeout-minutes: 12
@@ -55,45 +57,85 @@ jobs:
             PROXY="${{ inputs.proxy_address }}"
             if [ -z "$PROXY" ]; then PROXY="127.0.0.1"; fi
             echo "Mode: Traffic Interception — proxy: $PROXY"
-            printf "1\n${PROXY}\n" | reflutter input.apk 2>&1 | tee reflutter_run.log
+            printf "1\n${PROXY}\n" | python3 -m reflutter input.apk 2>&1 | tee reflutter_run.log
           else
             echo "Mode: Snapshot Dump"
-            printf "2\n" | reflutter input.apk 2>&1 | tee reflutter_run.log
+            printf "2\n" | python3 -m reflutter input.apk 2>&1 | tee reflutter_run.log
           fi
 
           echo "EXIT=${PIPESTATUS[0]}" >> $GITHUB_ENV
 
       - name: Check reflutter exit
         run: |
+          echo "=== Full reflutter log ==="
+          cat reflutter_run.log || true
+          echo "=== Exit code: $EXIT ==="
           if [ "$EXIT" != "0" ]; then
             echo "reflutter exited with code $EXIT"
-            cat reflutter_run.log || true
             exit 1
           fi
 
-      - name: Locate and package patched APK
+      - name: Inspect and repack patched APK
         run: |
-          echo "=== Directory listing ==="
+          echo "=== Workspace contents ==="
           ls -la
+
           echo "=== release/ contents ==="
           ls -la release/ 2>/dev/null || echo "(no release/ dir)"
-          echo "=== All APKs found ==="
-          find . -name "*.apk" | sort
 
-          # Prefer files in release/ dir; fall back to any .apk except input.apk
-          PATCHED=$(find ./release -name "*.apk" 2>/dev/null | head -1)
-          if [ -z "$PATCHED" ]; then
-            PATCHED=$(find . -maxdepth 3 -name "*.apk" ! -name "input.apk" 2>/dev/null | head -1)
+          echo "=== release/lib/ tree ==="
+          find release/lib -type f 2>/dev/null | sort || echo "(no lib dir)"
+
+          # Check if libflutter.so was patched (should exist)
+          FLUTTER_SO=$(find release/lib -name "libflutter.so" 2>/dev/null | head -1)
+          if [ -z "$FLUTTER_SO" ]; then
+            echo "WARNING: libflutter.so not found in release/lib — may not be a Flutter APK"
+          else
+            echo "libflutter.so found: $FLUTTER_SO  ($(du -sh "$FLUTTER_SO" | cut -f1))"
           fi
 
-          if [ -z "$PATCHED" ]; then
-            echo "ERROR: Cannot find any patched APK"
-            exit 1
+          # Check if reflutter produced a ready-made output APK
+          PATCHED=$(find . -maxdepth 3 -name "*.apk" ! -name "input.apk" 2>/dev/null | head -1)
+
+          if [ -n "$PATCHED" ]; then
+            echo "ReFlutter output APK found: $PATCHED"
+          else
+            echo "No output APK found — repacking release/ directory manually..."
+
+            if [ ! -d release ]; then
+              echo "ERROR: release/ directory missing — reflutter may have failed"
+              exit 1
+            fi
+
+            # Install zipalign
+            sudo apt-get install -y zipalign apksigner 2>/dev/null || true
+
+            # Repack: zip the extracted APK contents
+            cd release
+            zip -r ../release-patched-unsigned.apk . -x "META-INF/*" > /dev/null
+            cd ..
+            echo "Repacked: $(du -sh release-patched-unsigned.apk)"
+
+            # Sign with a throwaway debug key
+            keytool -genkeypair -v -keystore /tmp/debug.ks \
+              -alias androiddebugkey -keyalg RSA -keysize 2048 \
+              -validity 10000 -storepass android -keypass android \
+              -dname "CN=Android Debug,O=Android,C=US" 2>/dev/null
+
+            apksigner sign \
+              --ks /tmp/debug.ks --ks-pass pass:android --key-pass pass:android \
+              --out release-patched.apk \
+              release-patched-unsigned.apk 2>/dev/null || \
+            cp release-patched-unsigned.apk release-patched.apk
+
+            PATCHED="release-patched.apk"
+            echo "Final APK: $PATCHED  ($(du -sh "$PATCHED" | cut -f1))"
           fi
-          echo "Patched APK: $PATCHED  ($(du -sh "$PATCHED" | cut -f1))"
+
           mkdir -p reflutter_output
-          cp "$PATCHED" "reflutter_output/reflutter-patched.apk"
+          cp "$PATCHED" reflutter_output/reflutter-patched.apk
           cp reflutter_run.log reflutter_output/ 2>/dev/null || true
+          echo "Output ready: $(ls -lh reflutter_output/)"
 
       - name: Upload output artifact
         uses: actions/upload-artifact@v4
