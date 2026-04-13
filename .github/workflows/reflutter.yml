@@ -9,10 +9,6 @@ on:
       job_id:
         description: 'Unique job ID for artifact naming'
         required: true
-      reflutter_mode:
-        description: 'ReFlutter mode: 1=Traffic Intercept, 2=Snapshot Dump'
-        required: false
-        default: '1'
       proxy_address:
         description: 'Proxy IP address (e.g. 192.168.1.10) — used only for mode 1, port 8083 is fixed by ReFlutter'
         required: false
@@ -51,24 +47,12 @@ jobs:
       - name: Run reflutter
         timeout-minutes: 12
         run: |
-          MODE="${{ inputs.reflutter_mode }}"
-          if [ -z "$MODE" ] || { [ "$MODE" != "1" ] && [ "$MODE" != "2" ]; }; then MODE="1"; fi
+          PROXY="${{ inputs.proxy_address }}"
+          if [ -z "$PROXY" ]; then PROXY="127.0.0.1"; fi
+          echo "Traffic Intercept — proxy: $PROXY"
 
-          # Snapshot filesystem before
-          echo "--- Files before reflutter ---"
-          find . -maxdepth 3 -type f | sort
-
-          if [ "$MODE" = "1" ]; then
-            PROXY="${{ inputs.proxy_address }}"
-            if [ -z "$PROXY" ]; then PROXY="127.0.0.1"; fi
-            echo "Mode: Traffic Interception — proxy: $PROXY"
-            printf "1\n${PROXY}\n" | reflutter input.apk 2>&1 | tee reflutter_run.log
-            REFL_EXIT=${PIPESTATUS[1]}
-          else
-            echo "Mode: Snapshot Dump"
-            printf "2\n" | reflutter input.apk 2>&1 | tee reflutter_run.log
-            REFL_EXIT=${PIPESTATUS[1]}
-          fi
+          printf "1\n${PROXY}\n" | reflutter input.apk 2>&1 | tee reflutter_run.log
+          REFL_EXIT=${PIPESTATUS[1]}
 
           echo "--- Files after reflutter ---"
           find . -maxdepth 4 -type f | sort
