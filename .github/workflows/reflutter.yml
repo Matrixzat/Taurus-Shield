@@ -1,0 +1,101 @@
+name: ReFlutter — Flutter Engine Patch
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'Release asset ID of the uploaded APK'
+        required: true
+      job_id:
+        description: 'Unique job ID for artifact naming'
+        required: true
+      reflutter_mode:
+        description: 'ReFlutter mode: 1=Traffic Intercept, 2=Snapshot Dump'
+        required: false
+        default: '1'
+      proxy_address:
+        description: 'Proxy IP address (e.g. 192.168.1.10) — used only for mode 1, port 8083 is fixed by ReFlutter'
+        required: false
+        default: '127.0.0.1'
+
+jobs:
+  reflutter:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download uploaded APK
+        run: |
+          curl -fL \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
+            -o input.apk
+          ls -lh input.apk
+
+      - name: Delete uploaded asset from release
+        if: always()
+        run: |
+          curl -s -X DELETE \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" || true
+
+      - name: Install reflutter
+        run: pip3 install reflutter --quiet
+
+      - name: Run reflutter
+        timeout-minutes: 12
+        run: |
+          MODE="${{ inputs.reflutter_mode }}"
+          if [ -z "$MODE" ] || { [ "$MODE" != "1" ] && [ "$MODE" != "2" ]; }; then MODE="1"; fi
+
+          if [ "$MODE" = "1" ]; then
+            PROXY="${{ inputs.proxy_address }}"
+            if [ -z "$PROXY" ]; then PROXY="127.0.0.1"; fi
+            echo "Mode: Traffic Interception — proxy: $PROXY"
+            printf "1\n${PROXY}\n" | reflutter input.apk 2>&1 | tee reflutter_run.log
+          else
+            echo "Mode: Snapshot Dump"
+            printf "2\n" | reflutter input.apk 2>&1 | tee reflutter_run.log
+          fi
+
+          echo "EXIT=${PIPESTATUS[0]}" >> $GITHUB_ENV
+
+      - name: Check reflutter exit
+        run: |
+          if [ "$EXIT" != "0" ]; then
+            echo "reflutter exited with code $EXIT"
+            cat reflutter_run.log || true
+            exit 1
+          fi
+
+      - name: Locate and package patched APK
+        run: |
+          PATCHED=$(find . -maxdepth 2 \( -name "*.REpacked.apk" -o -name "*reflutter*.apk" -o -name "release.RE*.apk" \) 2>/dev/null | head -1)
+          if [ -z "$PATCHED" ]; then
+            echo "Cannot find patched APK — listing current directory:"
+            ls -la
+            exit 1
+          fi
+          echo "Patched APK: $PATCHED  ($(du -sh "$PATCHED" | cut -f1))"
+          mkdir -p reflutter_output
+          cp "$PATCHED" "reflutter_output/reflutter-patched.apk"
+          cp reflutter_run.log reflutter_output/ 2>/dev/null || true
+
+      - name: Upload output artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reflutter-${{ inputs.job_id }}
+          path: reflutter_output/
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload error log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: error-${{ inputs.job_id }}
+          path: reflutter_run.log
+          retention-days: 1
