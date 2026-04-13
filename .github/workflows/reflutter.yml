@@ -73,10 +73,21 @@ jobs:
 
       - name: Locate and package patched APK
         run: |
-          PATCHED=$(find . -maxdepth 2 \( -name "*.REpacked.apk" -o -name "*reflutter*.apk" -o -name "release.RE*.apk" \) 2>/dev/null | head -1)
+          echo "=== Directory listing ==="
+          ls -la
+          echo "=== release/ contents ==="
+          ls -la release/ 2>/dev/null || echo "(no release/ dir)"
+          echo "=== All APKs found ==="
+          find . -name "*.apk" | sort
+
+          # Prefer files in release/ dir; fall back to any .apk except input.apk
+          PATCHED=$(find ./release -name "*.apk" 2>/dev/null | head -1)
           if [ -z "$PATCHED" ]; then
-            echo "Cannot find patched APK — listing current directory:"
-            ls -la
+            PATCHED=$(find . -maxdepth 3 -name "*.apk" ! -name "input.apk" 2>/dev/null | head -1)
+          fi
+
+          if [ -z "$PATCHED" ]; then
+            echo "ERROR: Cannot find any patched APK"
             exit 1
           fi
           echo "Patched APK: $PATCHED  ($(du -sh "$PATCHED" | cut -f1))"
