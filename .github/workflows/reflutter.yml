@@ -9,6 +9,12 @@ on:
       job_id:
         description: 'Unique job ID for artifact naming'
         required: true
+      proxy_address:
+        required: false
+        default: '127.0.0.1'
+      reflutter_mode:
+        required: false
+        default: '1'
 jobs:
   reflutter:
     runs-on: ubuntu-latest
