@@ -9,11 +9,6 @@ on:
       job_id:
         description: 'Unique job ID for artifact naming'
         required: true
-      proxy_address:
-        description: 'Proxy IP address (e.g. 192.168.1.10) — used only for mode 1, port 8083 is fixed by ReFlutter'
-        required: false
-        default: '127.0.0.1'
-
 jobs:
   reflutter:
     runs-on: ubuntu-latest
@@ -47,11 +42,9 @@ jobs:
       - name: Run reflutter
         timeout-minutes: 12
         run: |
-          PROXY="${{ inputs.proxy_address }}"
-          if [ -z "$PROXY" ]; then PROXY="127.0.0.1"; fi
-          echo "Traffic Intercept — proxy: $PROXY"
+          echo "Traffic Intercept — proxy: 127.0.0.1"
 
-          printf "1\n${PROXY}\n" | reflutter input.apk 2>&1 | tee reflutter_run.log
+          printf "1\n127.0.0.1\n" | reflutter input.apk 2>&1 | tee reflutter_run.log
           REFL_EXIT=${PIPESTATUS[1]}
 
           echo "--- Files after reflutter ---"
