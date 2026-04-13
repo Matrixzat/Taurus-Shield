@@ -44,9 +44,9 @@ jobs:
 
       - name: Install tools
         run: |
-          pip3 install reflutter==0.0.24 --quiet
+          pip3 install reflutter --quiet
           echo "ReFlutter: $(pip3 show reflutter | grep -E '^Version')"
-          sudo apt-get install -y --no-install-recommends zipalign apksigner 2>/dev/null | tail -3
+          sudo apt-get install -y --no-install-recommends zipalign apksigner 2>&1 | tail -5 || true
 
       - name: Run reflutter
         timeout-minutes: 12
