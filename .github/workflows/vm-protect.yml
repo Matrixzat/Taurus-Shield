@@ -59,7 +59,12 @@ jobs:
       - name: Detect and extract input
         run: |
           mkdir -p extracted
-          if unzip -l input_asset 2>/dev/null | awk '{print $4}' | grep -v "/" | grep -q "\.apk$"; then
+          # Check whether the uploaded file is a ZIP *bundle* containing an APK.
+          # Note: APK files are themselves ZIP archives, so `file` always says
+          # "Zip archive data".  We distinguish a bundle from a raw APK by
+          # looking for any entry whose name ends with .apk (at any directory
+          # depth — do NOT filter with grep -v "/" or subdirectory bundles break).
+          if unzip -l input_asset 2>/dev/null | awk '{print $4}' | grep -q "\.apk$"; then
             echo "Input is a ZIP bundle containing an APK"
             unzip -o input_asset -d extracted || true
           else
@@ -79,6 +84,23 @@ jobs:
           echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
           echo "RULES_PATH=${RULES_PATH:-}" >> $GITHUB_ENV
           echo "MAPPING_PATH=${MAPPING_PATH:-}" >> $GITHUB_ENV
+
+      - name: APK pre-flight check
+        run: |
+          APK_ABS="$GITHUB_WORKSPACE/$APK_PATH"
+          echo "=== file ==="
+          file "$APK_ABS"
+          echo "=== size ==="
+          ls -lh "$APK_ABS"
+          echo "=== ZIP entries (first 30) ==="
+          unzip -l "$APK_ABS" 2>&1 | head -35
+          echo "=== AndroidManifest.xml present? ==="
+          if unzip -l "$APK_ABS" 2>/dev/null | grep -q "AndroidManifest.xml"; then
+            echo "YES — AndroidManifest.xml found"
+          else
+            echo "NO — AndroidManifest.xml missing! This APK is invalid or not a standard Android APK."
+            exit 1
+          fi
 
       - name: Log protection mode
         if: env.RULES_PATH == ''
