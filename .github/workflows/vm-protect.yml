@@ -59,11 +59,10 @@ jobs:
       - name: Detect and extract input
         run: |
           mkdir -p extracted
-          # Check whether the uploaded file is a ZIP *bundle* containing an APK.
-          # Note: APK files are themselves ZIP archives, so `file` always says
-          # "Zip archive data".  We distinguish a bundle from a raw APK by
-          # looking for any entry whose name ends with .apk (at any directory
-          # depth — do NOT filter with grep -v "/" or subdirectory bundles break).
+          # Detect whether the upload is a ZIP bundle containing an APK, or a raw APK.
+          # APK files are themselves ZIP archives, so `file` always says "Zip archive data".
+          # We distinguish a bundle by looking for any entry ending in .apk at any depth
+          # (do NOT filter with grep -v "/" — that breaks bundles with APK in a subfolder).
           if unzip -l input_asset 2>/dev/null | awk '{print $4}' | grep -q "\.apk$"; then
             echo "Input is a ZIP bundle containing an APK"
             unzip -o input_asset -d extracted || true
@@ -73,15 +72,23 @@ jobs:
           fi
           echo "=== Extracted ==="
           find extracted/ -type f | sort
-          APK_PATH=$(find extracted/ -name "*.apk" -type f | head -1)
-          if [ -z "$APK_PATH" ]; then
+          # Find the APK — may have spaces or special chars in its name.
+          RAW_APK=$(find extracted/ -name "*.apk" -type f | head -1)
+          if [ -z "$RAW_APK" ]; then
             echo "ERROR: no .apk found"
             exit 1
           fi
-          echo "APK: $APK_PATH"
-          RULES_PATH=$(find extracted/ -name "rules.txt" -type f | head -1)
+          echo "Found APK: $RAW_APK"
+          # Normalise: rename to a guaranteed space-free path so every downstream
+          # step can reference it safely without quoting gymnastics.
+          SAFE_APK="extracted/input.apk"
+          if [ "$RAW_APK" != "$SAFE_APK" ]; then
+            mv "$RAW_APK" "$SAFE_APK"
+            echo "Renamed to: $SAFE_APK"
+          fi
+          RULES_PATH=$(find extracted/ -name "rules.txt"   -type f | head -1)
           MAPPING_PATH=$(find extracted/ -name "mapping.txt" -type f | head -1)
-          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          echo "APK_PATH=$SAFE_APK"         >> $GITHUB_ENV
           echo "RULES_PATH=${RULES_PATH:-}" >> $GITHUB_ENV
           echo "MAPPING_PATH=${MAPPING_PATH:-}" >> $GITHUB_ENV
 
@@ -98,7 +105,7 @@ jobs:
           if unzip -l "$APK_ABS" 2>/dev/null | grep -q "AndroidManifest.xml"; then
             echo "YES — AndroidManifest.xml found"
           else
-            echo "NO — AndroidManifest.xml missing! This APK is invalid or not a standard Android APK."
+            echo "NO — AndroidManifest.xml missing! Not a standard Android APK."
             exit 1
           fi
 
@@ -199,23 +206,24 @@ jobs:
         run: |
           APK_ABS="$GITHUB_WORKSPACE/$APK_PATH"
           JAR="$GITHUB_WORKSPACE/vm-protect.jar"
-          CMD="java -jar $JAR apk $APK_ABS"
+          export ANDROID_SDK_HOME
+          export ANDROID_NDK_HOME
+          export CMAKE_PATH="$CMAKE_BIN"
+          echo "CMAKE_PATH=$CMAKE_PATH"
+          # Build args array — safe against spaces in any path.
+          ARGS=(java -jar "$JAR" apk "$APK_ABS")
           if [ -n "$RULES_PATH" ]; then
-            CMD="$CMD $GITHUB_WORKSPACE/$RULES_PATH"
+            ARGS+=("$GITHUB_WORKSPACE/$RULES_PATH")
             echo "Using rules: $RULES_PATH"
             if [ -n "$MAPPING_PATH" ]; then
-              CMD="$CMD $GITHUB_WORKSPACE/$MAPPING_PATH"
+              ARGS+=("$GITHUB_WORKSPACE/$MAPPING_PATH")
               echo "Using mapping: $MAPPING_PATH"
             fi
           else
             echo "No rules.txt -- protecting all classes"
           fi
-          echo "Command: $CMD"
-          export ANDROID_SDK_HOME
-          export ANDROID_NDK_HOME
-          export CMAKE_PATH="$CMAKE_BIN"
-          echo "CMAKE_PATH=$CMAKE_PATH"
-          $CMD 2>&1 | tee "$GITHUB_WORKSPACE/vmprotect_run.log"
+          echo "Command: ${ARGS[*]}"
+          "${ARGS[@]}" 2>&1 | tee "$GITHUB_WORKSPACE/vmprotect_run.log"
           exit ${PIPESTATUS[0]}
 
       - name: Collect output
