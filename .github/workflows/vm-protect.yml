@@ -59,38 +59,37 @@ jobs:
       - name: Detect and extract input
         run: |
           mkdir -p extracted
-          # Detect whether the upload is a ZIP bundle containing an APK, or a raw APK.
-          # APK files are themselves ZIP archives, so `file` always says "Zip archive data".
-          # We distinguish a bundle by looking for any entry ending in .apk at any depth
-          # (do NOT filter with grep -v "/" — that breaks bundles with APK in a subfolder).
-          if unzip -l input_asset 2>/dev/null | awk '{print $4}' | grep -q "\.apk$"; then
+          # zipinfo -1 prints one filename per line — correctly handles spaces and
+          # special characters that break "unzip -l | awk '{print $4}'".
+          # APK files are themselves ZIPs, so we distinguish a bundle (ZIP containing
+          # an APK) from a raw APK by checking whether any entry ends with .apk.
+          if zipinfo -1 input_asset 2>/dev/null | grep -q "\.apk$"; then
             echo "Input is a ZIP bundle containing an APK"
             unzip -o input_asset -d extracted || true
           else
             echo "Input is a raw APK"
             cp input_asset extracted/input.apk
           fi
-          echo "=== Extracted ==="
+          echo "=== Extracted files ==="
           find extracted/ -type f | sort
-          # Find the APK — may have spaces or special chars in its name.
+          # Capture the APK path — find handles spaces in filenames safely.
           RAW_APK=$(find extracted/ -name "*.apk" -type f | head -1)
           if [ -z "$RAW_APK" ]; then
-            echo "ERROR: no .apk found"
+            echo "ERROR: no .apk found after extraction"
             exit 1
           fi
           echo "Found APK: $RAW_APK"
-          # Normalise: rename to a guaranteed space-free path so every downstream
-          # step can reference it safely without quoting gymnastics.
+          # Always normalise to a space-free name so every downstream step is safe.
           SAFE_APK="extracted/input.apk"
           if [ "$RAW_APK" != "$SAFE_APK" ]; then
             mv "$RAW_APK" "$SAFE_APK"
             echo "Renamed to: $SAFE_APK"
           fi
-          RULES_PATH=$(find extracted/ -name "rules.txt"   -type f | head -1)
+          RULES_PATH=$(find extracted/ -name "rules.txt"    -type f | head -1)
           MAPPING_PATH=$(find extracted/ -name "mapping.txt" -type f | head -1)
-          echo "APK_PATH=$SAFE_APK"         >> $GITHUB_ENV
-          echo "RULES_PATH=${RULES_PATH:-}" >> $GITHUB_ENV
-          echo "MAPPING_PATH=${MAPPING_PATH:-}" >> $GITHUB_ENV
+          echo "APK_PATH=$SAFE_APK"              >> $GITHUB_ENV
+          echo "RULES_PATH=${RULES_PATH:-}"      >> $GITHUB_ENV
+          echo "MAPPING_PATH=${MAPPING_PATH:-}"  >> $GITHUB_ENV
 
       - name: APK pre-flight check
         run: |
@@ -210,7 +209,7 @@ jobs:
           export ANDROID_NDK_HOME
           export CMAKE_PATH="$CMAKE_BIN"
           echo "CMAKE_PATH=$CMAKE_PATH"
-          # Build args array — safe against spaces in any path.
+          # Build args as an array — safe against spaces in any path.
           ARGS=(java -jar "$JAR" apk "$APK_ABS")
           if [ -n "$RULES_PATH" ]; then
             ARGS+=("$GITHUB_WORKSPACE/$RULES_PATH")
