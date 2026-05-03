@@ -54,7 +54,6 @@ jobs:
 
       - name: Install Android NDK r25c
         run: |
-          # Download NDK r25c directly — most compatible with Dobby, no sdkmanager needed
           NDK_ZIP="android-ndk-r25c-linux.zip"
           NDK_DIR="$HOME/android-ndk-r25c"
           echo "Downloading NDK r25c..."
@@ -66,105 +65,54 @@ jobs:
           echo "ANDROID_NDK_HOME=$NDK_DIR" >> $GITHUB_ENV
           echo "NDK installed: $(ls $NDK_DIR/build/cmake/android.toolchain.cmake)"
 
-      - name: Build Dobby (arm64-v8a + armeabi-v7a)
+      - name: Download ShadowHook v2.0.0 (ByteDance, prebuilt)
         run: |
-          git clone --depth=1 https://github.com/jmpews/Dobby dobby-src
-          git -C dobby-src log --oneline -1
+          # ShadowHook is the 2025/2026 standard for Android inline hooking.
+          # Dobby is abandoned — open build bugs since 2024, never fixed.
+          # ShadowHook v2.0.0 (Jul 2025) ships prebuilt .so via Maven Central AAR.
+          VERSION="2.0.0"
+          AAR_URL="https://repo1.maven.org/maven2/com/bytedance/android/shadowhook/${VERSION}/shadowhook-${VERSION}.aar"
+          echo "Downloading ShadowHook ${VERSION} AAR..."
+          curl -fL "$AAR_URL" -o shadowhook.aar
+          echo "AAR size: $(du -sh shadowhook.aar)"
 
-          python3 - dobby-src "$NDK_HOME" << 'PYEOF'
-          import sys, os, re, glob, subprocess
+          # AAR is a ZIP — extract native libs and headers
+          unzip -q shadowhook.aar -d shadowhook_aar
+          echo "=== AAR contents ==="
+          find shadowhook_aar -type f | sort
 
-          SRC  = sys.argv[1]
-          NDK  = sys.argv[2]
+          # Copy .so files per ABI
+          mkdir -p shadowhook_libs/arm64-v8a shadowhook_libs/armeabi-v7a
+          cp shadowhook_aar/jni/arm64-v8a/libshadowhook.so    shadowhook_libs/arm64-v8a/  2>/dev/null || true
+          cp shadowhook_aar/jni/armeabi-v7a/libshadowhook.so  shadowhook_libs/armeabi-v7a/ 2>/dev/null || true
 
-          # ── Patch 1: arm64 asm @PAGE/@PAGEOFF → ELF syntax ──
-          asm = os.path.join(SRC, "source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm")
-          if os.path.exists(asm):
-              txt = open(asm).read()
-              txt = re.sub(r'([A-Za-z_]\w*)@PAGE\b', r'\1', txt)
-              txt = re.sub(r'([A-Za-z_]\w*)@PAGEOFF\b', r':lo12:\1', txt)
-              open(asm, 'w').write(txt)
-              print("Patch1 done: arm64 @PAGE/@PAGEOFF -> ELF")
-              for line in open(asm):
-                  if 'lo12' in line or '@PAGE' in line:
-                      print(" ", line.rstrip())
-          else:
-              print("WARNING: arm64 asm not found at", asm)
+          # Copy header if present; otherwise write the minimal API we need
+          mkdir -p shadowhook_include
+          if find shadowhook_aar -name "shadowhook.h" | grep -q .; then
+            cp "$(find shadowhook_aar -name 'shadowhook.h' | head -1)" shadowhook_include/
+            echo "Header found in AAR"
+          else
+            printf '%s\n' \
+              '#pragma once' \
+              '#include <stdbool.h>' \
+              '#ifdef __cplusplus' \
+              'extern "C" {' \
+              '#endif' \
+              '#define SHADOWHOOK_MODE_SHARED 0' \
+              '#define SHADOWHOOK_MODE_UNIQUE 1' \
+              'int   shadowhook_init(int mode, bool debuggable);' \
+              'void *shadowhook_hook_func_addr(void *func_addr, void *new_addr, void **orig_addr);' \
+              'int   shadowhook_unhook(void *stub);' \
+              '#ifdef __cplusplus' \
+              '}' \
+              '#endif' \
+              > shadowhook_include/shadowhook.h
+            echo "Header written from known API"
+          fi
 
-          # ── Patch 2: CMakeLists — add include directories ──
-          cmake_path = os.path.join(SRC, "CMakeLists.txt")
-          cmake_txt  = open(cmake_path).read()
-          inject = (
-              "\ninclude_directories(\n"
-              '  "${CMAKE_CURRENT_SOURCE_DIR}/source"\n'
-              '  "${CMAKE_CURRENT_SOURCE_DIR}/source/core"\n'
-              '  "${CMAKE_CURRENT_SOURCE_DIR}/source/core/arch"\n'
-              '  "${CMAKE_CURRENT_SOURCE_DIR}/source/core/arch/arm"\n'
-              '  "${CMAKE_CURRENT_SOURCE_DIR}/source/core/arch/arm64"\n'
-              ")\n"
-          )
-          cmake_txt = re.sub(r'(project\([^)]*\))', r'\1' + inject, cmake_txt, count=1)
-          open(cmake_path, 'w').write(cmake_txt)
-          print("Patch2 done: include_directories injected")
-          print(open(cmake_path).read().split('\n')[0:12])
-
-          # ── Patch 3: create Cpu.h stub if missing ──
-          arch_dir = os.path.join(SRC, "source/core/arch")
-          cpu_h    = os.path.join(arch_dir, "Cpu.h")
-          existing = glob.glob(os.path.join(SRC, "source/**/*Cpu*.h"), recursive=True)
-          print("Cpu.h search:", existing or "NOT FOUND")
-          if not os.path.exists(cpu_h):
-              os.makedirs(arch_dir, exist_ok=True)
-              open(cpu_h, 'w').write(
-                  "#pragma once\n"
-                  "#ifdef __aarch64__\n"
-                  "#  include \"arm64/constants-arm64.h\"\n"
-                  "#elif defined(__arm__)\n"
-                  "#  include \"arm/constants-arm.h\"\n"
-                  "   typedef uint32_t arm_inst_t;\n"
-                  "   typedef uint16_t thumb1_inst_t;\n"
-                  "   typedef uint32_t thumb2_inst_t;\n"
-                  "#elif defined(__i386__)\n"
-                  "#  include \"x86/constants-x86.h\"\n"
-                  "#elif defined(__x86_64__)\n"
-                  "#  include \"x64/constants-x64.h\"\n"
-                  "#endif\n"
-              )
-              print("Patch3 done: Cpu.h stub created")
-          else:
-              print("Patch3: Cpu.h already exists")
-          PYEOF
-
-          build_abi() {
-            ABI=$1; API=$2
-            echo "--- Building Dobby $ABI ---"
-            mkdir -p dobby-src/build-$ABI
-            cmake -S dobby-src -B dobby-src/build-$ABI \
-              -DCMAKE_TOOLCHAIN_FILE="$NDK_HOME/build/cmake/android.toolchain.cmake" \
-              -DANDROID_ABI=$ABI \
-              -DANDROID_NATIVE_API_LEVEL=$API \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DPlugin.SymbolResolver=OFF \
-              -DDOBBY_DEBUG=OFF \
-              -DANDROID_STL=c++_static \
-              2>&1 | grep -Ev "Deprecation Warning|cmake_minimum_required|Update the VERSION|Call Stack|syntax to tell|Compatibility with" \
-              || { echo "cmake configure FAILED $ABI"; return 1; }
-            cmake --build dobby-src/build-$ABI --target dobby -j$(nproc) 2>&1 \
-              || { echo "cmake build FAILED $ABI"; return 1; }
-            ls -la dobby-src/build-$ABI/libdobby.a && echo "✓ $ABI OK" || echo "✗ $ABI no lib"
-          }
-
-          build_abi arm64-v8a 26 || true
-          build_abi armeabi-v7a 21 || true
-
-          mkdir -p dobby_libs/arm64-v8a dobby_libs/armeabi-v7a
-          cp dobby-src/build-arm64-v8a/libdobby.a    dobby_libs/arm64-v8a/  2>/dev/null || true
-          cp dobby-src/build-armeabi-v7a/libdobby.a  dobby_libs/armeabi-v7a/ 2>/dev/null || true
-          cp -r dobby-src/include dobby_include
-
-          echo "=== Dobby lib check ==="
-          ls -la dobby_libs/arm64-v8a/ dobby_libs/armeabi-v7a/ 2>&1 || true
-          ls dobby_libs/arm64-v8a/libdobby.a || { echo "FATAL: arm64 Dobby build failed"; exit 1; }
+          echo "=== ShadowHook libs ==="
+          ls -la shadowhook_libs/arm64-v8a/ shadowhook_libs/armeabi-v7a/ 2>&1 || true
+          ls shadowhook_libs/arm64-v8a/libshadowhook.so || { echo "FATAL: arm64 libshadowhook.so missing"; exit 1; }
 
       - name: Generate hook source from features JSON
         run: |
@@ -219,7 +167,7 @@ jobs:
           }}""")
 
               hook_installs.append(f"""
-              DobbyHook(reinterpret_cast<void*>(base + {offset}),
+              shadowhook_hook_func_addr(reinterpret_cast<void*>(base + {offset}),
                         reinterpret_cast<void*>(hook_{s}),
                         reinterpret_cast<void**>(&orig_{s}));
               LOGI("Hook {i}: {feat.get('name','?')} @ %p", (void*)(base+{offset}));""")
@@ -239,7 +187,7 @@ jobs:
           #include <cstring>
           #include <cstdlib>
           #include <android/log.h>
-          #include "dobby.h"
+          #include "shadowhook.h"
           #define TAG "ModEngine"
           #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,TAG,__VA_ARGS__)
           #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR,TAG,__VA_ARGS__)
@@ -264,6 +212,7 @@ jobs:
 
           extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM*,void*){{
               LOGI("ModEngine loading — game: {game_name}");
+              shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
               installHooks();
               return JNI_VERSION_1_6;
           }}
@@ -292,11 +241,15 @@ jobs:
           cmake_minimum_required(VERSION 3.22)
           project(mod_engine CXX)
           set(CMAKE_CXX_STANDARD 17)
+
+          # ShadowHook — prebuilt shared lib from Maven Central
+          add_library(shadowhook SHARED IMPORTED)
+          set_target_properties(shadowhook PROPERTIES
+              IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/../shadowhook_libs/${ANDROID_ABI}/libshadowhook.so)
+
           add_library(ModEngine SHARED mod_engine.cpp)
-          target_include_directories(ModEngine PRIVATE ${CMAKE_SOURCE_DIR}/../dobby_include/include)
-          target_link_libraries(ModEngine
-              ${CMAKE_SOURCE_DIR}/../dobby_libs/${ANDROID_ABI}/libdobby.a
-              android log)
+          target_include_directories(ModEngine PRIVATE ${CMAKE_SOURCE_DIR}/../shadowhook_include)
+          target_link_libraries(ModEngine shadowhook android log)
           target_compile_options(ModEngine PRIVATE -O2 -fvisibility=hidden -fstack-protector-strong)
           CMAKE
 
@@ -314,7 +267,7 @@ jobs:
       - name: Compile armeabi-v7a
         run: |
           ABI=armeabi-v7a
-          if [ -f dobby_libs/$ABI/libdobby.a ]; then
+          if [ -f shadowhook_libs/$ABI/libshadowhook.so ]; then
             mkdir -p mod_src/build-$ABI
             cmake -S mod_src -B mod_src/build-$ABI \
               -DCMAKE_TOOLCHAIN_FILE="$NDK_HOME/build/cmake/android.toolchain.cmake" \
@@ -322,6 +275,8 @@ jobs:
               -DCMAKE_BUILD_TYPE=Release -DCMAKE_SOURCE_DIR="$(pwd)/mod_src" > /dev/null 2>&1
             cmake --build mod_src/build-$ABI --target ModEngine -j$(nproc) > /dev/null 2>&1
             echo "armeabi-v7a done"
+          else
+            echo "armeabi-v7a libshadowhook.so not found in AAR — skipping"
           fi
 
       - name: Patch game APK
@@ -334,12 +289,20 @@ jobs:
           with zipfile.ZipFile("game.apk") as z: z.extractall("apk_work")
 
           for abi in ["arm64-v8a","armeabi-v7a"]:
+              lib_dir = f"apk_work/lib/{abi}"
+              os.makedirs(lib_dir, exist_ok=True)
+
+              # Inject our hook .so
               src = f"mod_src/build-{abi}/libModEngine.so"
-              dst = f"apk_work/lib/{abi}/libModEngine.so"
               if os.path.exists(src):
-                  os.makedirs(os.path.dirname(dst), exist_ok=True)
-                  shutil.copy(src, dst)
+                  shutil.copy(src, f"{lib_dir}/libModEngine.so")
                   print(f"Injected libModEngine.so → lib/{abi}/")
+
+              # Bundle ShadowHook .so — required since we link it as shared
+              shadow_src = f"shadowhook_libs/{abi}/libshadowhook.so"
+              if os.path.exists(shadow_src):
+                  shutil.copy(shadow_src, f"{lib_dir}/libshadowhook.so")
+                  print(f"Bundled  libshadowhook.so → lib/{abi}/")
 
           out = f"{game_name}_unsigned.apk"
           with zipfile.ZipFile(out,"w",zipfile.ZIP_DEFLATED) as z:
