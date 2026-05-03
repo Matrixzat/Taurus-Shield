@@ -1,0 +1,342 @@
+name: Mod Builder (Unity IL2CPP)
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'Release asset ID of the game APK (from analyze-queue release)'
+        required: true
+      job_id:
+        description: 'Tracking ID — used to name the output asset'
+        required: true
+      game_name:
+        description: 'Game name (no spaces)'
+        required: true
+        default: 'game'
+      features_json:
+        description: 'JSON array of features: [{name,offset,type,default_val,max_val}]'
+        required: true
+        default: '[]'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Get analyze-queue release ID
+        id: release
+        run: |
+          RELEASE=$(curl -s \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_PAT }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/analyze-queue")
+          RELEASE_ID=$(echo "$RELEASE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
+          echo "Using release ID: $RELEASE_ID"
+
+      - name: Download game APK
+        run: |
+          curl -L \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_PAT }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
+            -o game.apk
+          echo "APK size: $(du -sh game.apk)"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Install Android NDK
+        run: |
+          NDK_VERSION="27.0.12077973"
+          SDK_ROOT="$HOME/android-sdk"
+          mkdir -p "$SDK_ROOT/cmdline-tools"
+
+          curl -s "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" \
+            -o cmdline-tools.zip
+          unzip -q cmdline-tools.zip -d "$SDK_ROOT/cmdline-tools"
+          mv "$SDK_ROOT/cmdline-tools/cmdline-tools" "$SDK_ROOT/cmdline-tools/latest" 2>/dev/null || true
+
+          export PATH="$SDK_ROOT/cmdline-tools/latest/bin:$PATH"
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "ndk;$NDK_VERSION" > /dev/null 2>&1
+
+          echo "NDK_HOME=$SDK_ROOT/ndk/$NDK_VERSION" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/$NDK_VERSION" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> $GITHUB_ENV
+
+      - name: Build Dobby (arm64-v8a + armeabi-v7a)
+        run: |
+          git clone --depth=1 https://github.com/jmpews/Dobby dobby-src
+
+          build_abi() {
+            ABI=$1; API=$2
+            echo "Building Dobby for $ABI..."
+            mkdir -p dobby-src/build-$ABI
+            cmake -S dobby-src -B dobby-src/build-$ABI \
+              -DCMAKE_TOOLCHAIN_FILE="$NDK_HOME/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI=$ABI \
+              -DANDROID_NATIVE_API_LEVEL=$API \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DPlugin.SymbolResolver=OFF -DDOBBY_DEBUG=OFF \
+              > /dev/null 2>&1
+            cmake --build dobby-src/build-$ABI --target dobby -j$(nproc) > /dev/null 2>&1
+            ls dobby-src/build-$ABI/libdobby.a 2>/dev/null && echo "✓ $ABI" || echo "✗ $ABI failed"
+          }
+
+          build_abi arm64-v8a 26
+          build_abi armeabi-v7a 21
+
+          mkdir -p dobby_libs/arm64-v8a dobby_libs/armeabi-v7a
+          cp dobby-src/build-arm64-v8a/libdobby.a    dobby_libs/arm64-v8a/  2>/dev/null || true
+          cp dobby-src/build-armeabi-v7a/libdobby.a  dobby_libs/armeabi-v7a/ 2>/dev/null || true
+          cp -r dobby-src/include dobby_include
+
+      - name: Generate hook source from features JSON
+        run: |
+          python3 - <<'PYEOF'
+          import json, os
+
+          features_raw = os.environ.get("FEATURES_JSON", "[]")
+          game_name    = os.environ.get("GAME_NAME", "game")
+
+          try:    features = json.loads(features_raw)
+          except: features = []
+
+          print(f"Generating hooks: {len(features)} features for '{game_name}'")
+
+          hook_decls, hook_installs, jni_cases = [], [], []
+
+          for i, feat in enumerate(features):
+              name   = feat.get("name", f"Feature{i}").replace(" ","_").replace("-","_")
+              offset = feat.get("offset", "0x0")
+              ftype  = feat.get("type", "bool")
+              s      = f"feat_{i}_{name[:20]}"
+
+              if ftype == "bool":
+                  hook_decls.append(f"""
+          typedef bool (*{s}_fn)(void*);
+          static {s}_fn orig_{s} = nullptr;
+          static bool val_{s} = false;
+          static bool hook_{s}(void* thiz) {{
+              if (val_{s}) return true;
+              return orig_{s} ? orig_{s}(thiz) : false;
+          }}""")
+              elif ftype in ("int","long"):
+                  ct = "long long" if ftype=="long" else "int"
+                  hook_decls.append(f"""
+          typedef {ct} (*{s}_fn)(void*);
+          static {s}_fn orig_{s} = nullptr;
+          static {ct} val_{s} = 0;
+          static bool enabled_{s} = false;
+          static {ct} hook_{s}(void* thiz) {{
+              if (enabled_{s}) return val_{s};
+              return orig_{s} ? orig_{s}(thiz) : 0;
+          }}""")
+              elif ftype == "float":
+                  hook_decls.append(f"""
+          typedef float (*{s}_fn)(void*);
+          static {s}_fn orig_{s} = nullptr;
+          static float val_{s} = 1.0f;
+          static bool enabled_{s} = false;
+          static float hook_{s}(void* thiz) {{
+              if (enabled_{s}) return val_{s};
+              return orig_{s} ? orig_{s}(thiz) : 1.0f;
+          }}""")
+
+              hook_installs.append(f"""
+              DobbyHook(reinterpret_cast<void*>(base + {offset}),
+                        reinterpret_cast<void*>(hook_{s}),
+                        reinterpret_cast<void**>(&orig_{s}));
+              LOGI("Hook {i}: {feat.get('name','?')} @ %p", (void*)(base+{offset}));""")
+
+              if ftype == "bool":
+                  jni_cases.append(f"        case {i}: val_{s} = (bool)boolVal; break;")
+              elif ftype in ("int","long"):
+                  cast = "longVal" if ftype=="long" else "(int)intVal"
+                  jni_cases.append(f"        case {i}: val_{s}={cast}; enabled_{s}=(bool)boolVal; break;")
+              elif ftype == "float":
+                  jni_cases.append(f"        case {i}: val_{s}=(float)intVal; enabled_{s}=(bool)boolVal; break;")
+
+          cpp = f"""// Auto-generated by Taurus Shield Mod Engine
+          // Game: {game_name}  Features: {len(features)}
+          #include <jni.h>
+          #include <cstdio>
+          #include <cstring>
+          #include <cstdlib>
+          #include <android/log.h>
+          #include "dobby.h"
+          #define TAG "ModEngine"
+          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,TAG,__VA_ARGS__)
+          #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR,TAG,__VA_ARGS__)
+
+          static uintptr_t findBase(const char* lib) {{
+              FILE* f = fopen("/proc/self/maps","r"); if(!f) return 0;
+              char line[512]; uintptr_t base=0;
+              while(fgets(line,sizeof(line),f))
+                  if(strstr(line,lib)&&strstr(line,"r-xp")){{base=(uintptr_t)strtoull(line,nullptr,16);break;}}
+              fclose(f); return base;
+          }}
+
+          {"".join(hook_decls)}
+
+          static void installHooks(){{
+              uintptr_t base=findBase("libil2cpp.so");
+              if(!base){{LOGE("libil2cpp.so not found");return;}}
+              LOGI("base=0x%lx",(unsigned long)base);
+          {"".join(hook_installs)}
+              LOGI("All {len(features)} hooks installed");
+          }}
+
+          extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM*,void*){{
+              LOGI("ModEngine loading — game: {game_name}");
+              installHooks();
+              return JNI_VERSION_1_6;
+          }}
+
+          extern "C" JNIEXPORT void JNICALL
+          Java_com_taurus_shield_ModEngineLoader_applyFeature(
+                  JNIEnv*,jclass,jint featNum,jint intVal,jlong longVal,jboolean boolVal){{
+              switch(featNum){{
+          {"chr(10).join(jni_cases)}
+                  default: LOGE("Unknown feature %d",(int)featNum); break;
+              }}
+          }}
+          """
+
+          os.makedirs("mod_src", exist_ok=True)
+          with open("mod_src/mod_engine.cpp","w") as f: f.write(cpp)
+          print(f"Generated mod_src/mod_engine.cpp ({len(cpp)} chars)")
+          PYEOF
+        env:
+          FEATURES_JSON: ${{ inputs.features_json }}
+          GAME_NAME: ${{ inputs.game_name }}
+
+      - name: Write CMakeLists
+        run: |
+          cat > mod_src/CMakeLists.txt <<'CMAKE'
+          cmake_minimum_required(VERSION 3.22)
+          project(mod_engine CXX)
+          set(CMAKE_CXX_STANDARD 17)
+          add_library(ModEngine SHARED mod_engine.cpp)
+          target_include_directories(ModEngine PRIVATE ${CMAKE_SOURCE_DIR}/../dobby_include/include)
+          target_link_libraries(ModEngine
+              ${CMAKE_SOURCE_DIR}/../dobby_libs/${ANDROID_ABI}/libdobby.a
+              android log)
+          target_compile_options(ModEngine PRIVATE -O2 -fvisibility=hidden -fstack-protector-strong)
+          CMAKE
+
+      - name: Compile arm64-v8a
+        run: |
+          ABI=arm64-v8a
+          mkdir -p mod_src/build-$ABI
+          cmake -S mod_src -B mod_src/build-$ABI \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=$ABI -DANDROID_NATIVE_API_LEVEL=26 \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_SOURCE_DIR="$(pwd)/mod_src"
+          cmake --build mod_src/build-$ABI --target ModEngine -j$(nproc)
+          ls -la mod_src/build-$ABI/libModEngine.so
+
+      - name: Compile armeabi-v7a
+        run: |
+          ABI=armeabi-v7a
+          if [ -f dobby_libs/$ABI/libdobby.a ]; then
+            mkdir -p mod_src/build-$ABI
+            cmake -S mod_src -B mod_src/build-$ABI \
+              -DCMAKE_TOOLCHAIN_FILE="$NDK_HOME/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI=$ABI -DANDROID_NATIVE_API_LEVEL=21 \
+              -DCMAKE_BUILD_TYPE=Release -DCMAKE_SOURCE_DIR="$(pwd)/mod_src" > /dev/null 2>&1
+            cmake --build mod_src/build-$ABI --target ModEngine -j$(nproc) > /dev/null 2>&1
+            echo "armeabi-v7a done"
+          fi
+
+      - name: Patch game APK
+        run: |
+          python3 - <<'PYEOF'
+          import zipfile, os, shutil
+
+          game_name = os.environ.get("GAME_NAME","game")
+          os.makedirs("apk_work", exist_ok=True)
+          with zipfile.ZipFile("game.apk") as z: z.extractall("apk_work")
+
+          for abi in ["arm64-v8a","armeabi-v7a"]:
+              src = f"mod_src/build-{abi}/libModEngine.so"
+              dst = f"apk_work/lib/{abi}/libModEngine.so"
+              if os.path.exists(src):
+                  os.makedirs(os.path.dirname(dst), exist_ok=True)
+                  shutil.copy(src, dst)
+                  print(f"Injected libModEngine.so → lib/{abi}/")
+
+          out = f"{game_name}_unsigned.apk"
+          with zipfile.ZipFile(out,"w",zipfile.ZIP_DEFLATED) as z:
+              for root,_,files in os.walk("apk_work"):
+                  for f in files:
+                      fp = os.path.join(root,f)
+                      arc = os.path.relpath(fp,"apk_work")
+                      z.write(fp, arc, zipfile.ZIP_STORED if arc.endswith(".so") else zipfile.ZIP_DEFLATED)
+          print(f"Unsigned APK: {out} ({os.path.getsize(out)//1024//1024} MB)")
+          PYEOF
+        env:
+          GAME_NAME: ${{ inputs.game_name }}
+
+      - name: Sign modded APK
+        run: |
+          GAME_NAME="${{ inputs.game_name }}"
+          UNSIGNED="${GAME_NAME}_unsigned.apk"
+          ALIGNED="${GAME_NAME}_aligned.apk"
+          SIGNED="${GAME_NAME}_signed.apk"
+
+          SDK_ROOT="$ANDROID_SDK_ROOT"
+          export PATH="$SDK_ROOT/cmdline-tools/latest/bin:$PATH"
+          sdkmanager "build-tools;34.0.0" > /dev/null 2>&1
+          BUILD_TOOLS="$SDK_ROOT/build-tools/34.0.0"
+
+          "$BUILD_TOOLS/zipalign" -v -p 4 "$UNSIGNED" "$ALIGNED"
+
+          echo "$KEYSTORE_B64" | base64 -d > signing.keystore
+
+          "$BUILD_TOOLS/apksigner" sign \
+            --ks signing.keystore \
+            --ks-pass "pass:Matrix@2026" \
+            --ks-key-alias "matrix_hbc_key" \
+            --key-pass "pass:Matrix@2026" \
+            --out "$SIGNED" "$ALIGNED"
+
+          echo "SIGNED_APK=$SIGNED" >> $GITHUB_ENV
+          echo "Signed: $SIGNED ($(du -sh $SIGNED | cut -f1))"
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+
+      - name: Upload modded APK to analyze-queue release
+        run: |
+          RELEASE_ID="${{ steps.release.outputs.release_id }}"
+          JOB_ID="${{ inputs.job_id }}"
+          SIGNED="${{ env.SIGNED_APK }}"
+          [ -f "$SIGNED" ] || SIGNED="${{ inputs.game_name }}_unsigned.apk"
+
+          ASSET_NAME="modded_${JOB_ID}.apk"
+          echo "Uploading $ASSET_NAME..."
+          curl -s -L -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_PAT }}" \
+            -H "Content-Type: application/vnd.android.package-archive" \
+            "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=$ASSET_NAME" \
+            --data-binary @"$SIGNED" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print('Uploaded — asset_id:', d.get('id','error'))"
+
+      - name: Delete input APK asset
+        run: |
+          curl -s -L -X DELETE \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_PAT }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}"
+          echo "Input APK deleted"
+
+      - name: Summary
+        run: |
+          echo "## Mod Build Complete ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- **Game:** ${{ inputs.game_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Job ID:** ${{ inputs.job_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Output:** modded_${{ inputs.job_id }}.apk" >> $GITHUB_STEP_SUMMARY
