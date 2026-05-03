@@ -1,0 +1,184 @@
+name: Game Dump (IL2CPP Analyser)
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'Release asset ID of the game APK (from analyze-queue release)'
+        required: true
+      job_id:
+        description: 'Tracking ID — used to name the output asset'
+        required: true
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Get analyze-queue release ID
+        id: release
+        run: |
+          RELEASE=$(curl -s \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_PAT }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/analyze-queue")
+          RELEASE_ID=$(echo "$RELEASE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
+          echo "Using release ID: $RELEASE_ID"
+
+      - name: Download game APK
+        run: |
+          curl -L \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_PAT }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
+            -o game.apk
+          echo "APK size: $(du -sh game.apk)"
+
+      - name: Extract IL2CPP files
+        run: |
+          python3 - <<'EOF'
+          import zipfile, os, sys
+
+          os.makedirs("il2cpp", exist_ok=True)
+
+          with zipfile.ZipFile("game.apk") as z:
+              names = z.namelist()
+
+              il2cpp_candidates = [n for n in names if "libil2cpp.so" in n]
+              il2cpp_candidates.sort(key=lambda x: (0 if "arm64" in x else 1))
+              meta_candidates   = [n for n in names if "global-metadata.dat" in n]
+
+              if not il2cpp_candidates:
+                  print("ERROR: libil2cpp.so not found — not a Unity IL2CPP game")
+                  sys.exit(1)
+              if not meta_candidates:
+                  print("ERROR: global-metadata.dat not found — IL2CPP metadata missing")
+                  sys.exit(1)
+
+              for src, dst in [(il2cpp_candidates[0], "il2cpp/libil2cpp.so"),
+                               (meta_candidates[0],   "il2cpp/global-metadata.dat")]:
+                  data = z.read(src)
+                  with open(dst, "wb") as f: f.write(data)
+                  print(f"Extracted {src} → {dst} ({len(data)//1024} KB)")
+
+          print("Extraction complete")
+          EOF
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Download Il2CppDumper
+        run: |
+          LATEST="https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-linux.zip"
+          curl -L "$LATEST" -o Il2CppDumper.zip
+          unzip -q Il2CppDumper.zip -d Il2CppDumper
+          chmod +x Il2CppDumper/Il2CppDumper 2>/dev/null || true
+          ls -la Il2CppDumper/
+
+      - name: Run Il2CppDumper
+        run: |
+          mkdir -p dump_out
+          cd Il2CppDumper
+          EXE=$(find . -name "Il2CppDumper" -o -name "Il2CppDumper.dll" | head -1)
+          if [[ "$EXE" == *.dll ]]; then
+            dotnet "$EXE" ../il2cpp/libil2cpp.so ../il2cpp/global-metadata.dat ../dump_out/ || true
+          else
+            ./$EXE ../il2cpp/libil2cpp.so ../il2cpp/global-metadata.dat ../dump_out/ || true
+          fi
+          ls -la ../dump_out/ 2>/dev/null || echo "No output"
+
+      - name: Parse dump → offsets.json
+        run: |
+          python3 - <<'EOF'
+          import re, json, os, sys
+
+          dump_file = "dump_out/dump.cs"
+          if not os.path.exists(dump_file):
+              sj = "dump_out/script.json"
+              if os.path.exists(sj):
+                  with open(sj) as f: data = json.load(f)
+                  print(f"Using script.json: {len(data)} entries")
+                  with open("offsets.json", "w") as f: json.dump(data, f, indent=2)
+                  sys.exit(0)
+              else:
+                  print("ERROR: No dump output found"); sys.exit(1)
+
+          methods = []
+          current_class = ""
+          with open(dump_file, encoding="utf-8", errors="replace") as f:
+              for line in f:
+                  cm = re.match(r'^\s*(?:public|private|protected).*class\s+(\w+)', line)
+                  if cm: current_class = cm.group(1)
+
+                  mm = re.match(r'\s*//\s*Offset:\s*(0x[0-9A-Fa-f]+)', line)
+                  if mm:
+                      methods.append({"class": current_class, "offset": mm.group(1), "method": None})
+                  elif methods and methods[-1].get("method") is None:
+                      sig = re.search(r'(\w[\w\s\*<>\[\]]+)\s+(\w+)\s*\(([^)]*)\)', line)
+                      if sig and not line.strip().startswith('//'):
+                          methods[-1].update({
+                              "method": sig.group(2).strip(),
+                              "return_type": sig.group(1).strip(),
+                              "params": sig.group(3).strip(),
+                              "signature": line.strip()
+                          })
+
+          methods = [m for m in methods if m.get("method")]
+          keywords = {
+              "coin":9,"gold":9,"gem":9,"diamond":9,"money":8,"cash":7,
+              "unlock":8,"premium":8,"vip":7,"afford":9,"canAfford":10,
+              "enough":7,"cost":6,"speed":6,"damage":6,"health":6,"hp":6,
+              "cooldown":7,"infinite":10,"unlimited":10,"max":5,
+              "add":2,"set":2,"get":1
+          }
+          for m in methods:
+              text = (m.get("method","") + " " + m.get("class","")).lower()
+              m["interest_score"] = sum(pts for kw,pts in keywords.items() if kw in text)
+
+          methods.sort(key=lambda x: -x["interest_score"])
+          top = [m for m in methods if m["interest_score"] > 0][:500]
+
+          result = {"total_methods": len(methods), "interesting_methods": top, "all_methods": methods[:2000]}
+          with open("offsets.json","w") as f: json.dump(result, f, indent=2)
+          print(f"offsets.json: {len(top)} interesting / {len(methods)} total methods")
+          EOF
+
+      - name: Upload offsets.json to analyze-queue release
+        run: |
+          RELEASE_ID="${{ steps.release.outputs.release_id }}"
+          ASSET_NAME="dump_offsets_${{ inputs.job_id }}.json"
+
+          curl -s -L \
+            -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_PAT }}" \
+            -H "Content-Type: application/json" \
+            "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=$ASSET_NAME" \
+            --data-binary @offsets.json \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print('Uploaded — asset_id:', d.get('id','error'))"
+
+          # Upload dump.cs too if present
+          if [ -f dump_out/dump.cs ]; then
+            curl -s -L -X POST \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_PAT }}" \
+              -H "Content-Type: text/plain" \
+              "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=dump_cs_${{ inputs.job_id }}.txt" \
+              --data-binary @dump_out/dump.cs | python3 -c "import sys,json; d=json.load(sys.stdin); print('dump.cs asset_id:', d.get('id','?'))"
+          fi
+
+      - name: Delete input APK asset
+        run: |
+          curl -s -L -X DELETE \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_PAT }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}"
+          echo "Input APK deleted"
+
+      - name: Summary
+        run: |
+          echo "## Game Dump Complete ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- **Job ID:** ${{ inputs.job_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Output:** dump_offsets_${{ inputs.job_id }}.json" >> $GITHUB_STEP_SUMMARY
+          [ -f offsets.json ] && echo "- **offsets.json:** $(du -sh offsets.json | cut -f1)" >> $GITHUB_STEP_SUMMARY || true
