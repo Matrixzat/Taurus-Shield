@@ -87,19 +87,29 @@ jobs:
       - name: Run Il2CppDumper
         run: |
           mkdir -p dump_out
-          cd Il2CppDumper
-          EXE=$(find . -name "Il2CppDumper" -o -name "Il2CppDumper.dll" | head -1)
-          if [[ "$EXE" == *.dll ]]; then
-            dotnet "$EXE" ../il2cpp/libil2cpp.so ../il2cpp/global-metadata.dat ../dump_out/ || true
-          else
-            ./$EXE ../il2cpp/libil2cpp.so ../il2cpp/global-metadata.dat ../dump_out/ || true
+          # Always invoke via dotnet (works for both .dll and self-contained on Linux)
+          DLL=$(find Il2CppDumper -name "Il2CppDumper.dll" | head -1)
+          if [ -z "$DLL" ]; then
+            echo "ERROR: Il2CppDumper.dll not found in zip"; ls -la Il2CppDumper/; exit 1
           fi
-          ls -la ../dump_out/ 2>/dev/null || echo "No output"
+          echo "Running: dotnet $DLL"
+          dotnet "$DLL" il2cpp/libil2cpp.so il2cpp/global-metadata.dat dump_out/ 2>&1 | tee dumper_output.txt || true
+          echo "=== dumper stdout/stderr above ==="
+          echo "=== dump_out contents ==="
+          ls -la dump_out/ 2>/dev/null || echo "(empty)"
 
       - name: Parse dump → offsets.json
         run: |
           python3 - <<'EOF'
           import re, json, os, sys
+
+          # Show dumper log for debugging
+          if os.path.exists("dumper_output.txt"):
+              with open("dumper_output.txt") as f:
+                  out = f.read().strip()
+              print("=== Il2CppDumper output ===")
+              print(out[-3000:] if len(out) > 3000 else out)
+              print("===========================")
 
           dump_file = "dump_out/dump.cs"
           if not os.path.exists(dump_file):
@@ -109,8 +119,20 @@ jobs:
                   print(f"Using script.json: {len(data)} entries")
                   with open("offsets.json", "w") as f: json.dump(data, f, indent=2)
                   sys.exit(0)
-              else:
-                  print("ERROR: No dump output found"); sys.exit(1)
+
+              # List whatever IS in dump_out for diagnosis
+              out_files = os.listdir("dump_out") if os.path.isdir("dump_out") else []
+              print(f"dump_out contains: {out_files}")
+              dumper_log = open("dumper_output.txt").read() if os.path.exists("dumper_output.txt") else "no log"
+              error_json = {
+                  "error": "Il2CppDumper produced no output",
+                  "dump_out_files": out_files,
+                  "dumper_log": dumper_log[-2000:],
+                  "total_methods": 0, "interesting_methods": [], "all_methods": []
+              }
+              with open("offsets.json", "w") as f: json.dump(error_json, f, indent=2)
+              print("Wrote error offsets.json — workflow will continue and upload diagnostic JSON")
+              sys.exit(0)  # don't fail — let upload step run so worker can return the error
 
           methods = []
           current_class = ""
