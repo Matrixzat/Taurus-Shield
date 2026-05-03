@@ -151,6 +151,10 @@ jobs:
                   hook_decls.append(f"""
           static float hook_{s}(void*) {{ return {float(max_val)}f; }}""")
 
+              elif ftype == "void":
+                  hook_decls.append(f"""
+          static void hook_{s}(void*) {{ /* no-op: suppress this function */ }}""")
+
               hook_installs.append(f"""
               shadowhook_hook_func_addr(reinterpret_cast<void*>(base + {offset}),
                         reinterpret_cast<void*>(hook_{s}), nullptr);
