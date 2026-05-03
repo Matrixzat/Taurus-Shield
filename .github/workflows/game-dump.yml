@@ -137,42 +137,69 @@ jobs:
               print("Wrote error offsets.json — workflow will continue and upload diagnostic JSON")
               sys.exit(0)  # don't fail — let upload step run so worker can return the error
 
+          # Il2CppDumper v6.7+ format: // RVA: 0x... Offset: 0x... VA: 0x...
+          # (one line before the method signature)
           methods = []
           current_class = ""
+          pending = None
+
           with open(dump_file, encoding="utf-8", errors="replace") as f:
               for line in f:
-                  cm = re.match(r'^\s*(?:public|private|protected).*class\s+(\w+)', line)
-                  if cm: current_class = cm.group(1)
+                  # Track current class/struct/interface name
+                  cm = re.match(
+                      r'^\s*(?:public |private |protected |internal |sealed |abstract )*'
+                      r'(?:class|struct|interface)\s+(\w+)', line)
+                  if cm:
+                      current_class = cm.group(1)
 
-                  mm = re.match(r'\s*//\s*Offset:\s*(0x[0-9A-Fa-f]+)', line)
+                  # Match RVA/Offset annotation line
+                  mm = re.search(
+                      r'//\s*RVA:\s*(0x[0-9A-Fa-f]+)\s+Offset:\s*(0x[0-9A-Fa-f]+)', line)
                   if mm:
-                      methods.append({"class": current_class, "offset": mm.group(1), "method": None})
-                  elif methods and methods[-1].get("method") is None:
-                      sig = re.search(r'(\w[\w\s\*<>\[\]]+)\s+(\w+)\s*\(([^)]*)\)', line)
-                      if sig and not line.strip().startswith('//'):
-                          methods[-1].update({
+                      pending = {"rva": mm.group(1), "offset": mm.group(2), "class": current_class}
+                      continue
+
+                  # Method signature on the line immediately after the annotation
+                  if pending is not None:
+                      sig = re.search(
+                          r'(\w[\w\s\*<>\[\],\.]+)\s+(\w+)\s*\(([^)]*)\)', line)
+                      if sig and not line.strip().startswith("//"):
+                          pending.update({
                               "method": sig.group(2).strip(),
                               "return_type": sig.group(1).strip(),
                               "params": sig.group(3).strip(),
                               "signature": line.strip()
                           })
+                          methods.append(pending)
+                      pending = None
 
-          methods = [m for m in methods if m.get("method")]
           keywords = {
-              "coin":9,"gold":9,"gem":9,"diamond":9,"money":8,"cash":7,
-              "unlock":8,"premium":8,"vip":7,"afford":9,"canAfford":10,
-              "enough":7,"cost":6,"speed":6,"damage":6,"health":6,"hp":6,
-              "cooldown":7,"infinite":10,"unlimited":10,"max":5,
-              "add":2,"set":2,"get":1
+              "coin":9,"gold":9,"gem":9,"diamond":9,"money":8,"cash":8,
+              "unlock":8,"premium":8,"vip":7,"affor":9,
+              "enough":7,"cost":6,"speed":7,"damage":6,"health":6,"hp":6,
+              "score":7,"point":6,"reward":7,"chest":7,"pickup":6,
+              "cooldown":7,"infinite":10,"unlimited":10,"invincib":10,"revive":8,
+              "cheat":10,"hack":10,"spawn":6,"max":5,
+              "save":4,"load":4,"add":2,"set":2,"get":1
           }
           for m in methods:
               text = (m.get("method","") + " " + m.get("class","")).lower()
-              m["interest_score"] = sum(pts for kw,pts in keywords.items() if kw in text)
+              m["interest_score"] = sum(pts for kw, pts in keywords.items() if kw in text)
 
           methods.sort(key=lambda x: -x["interest_score"])
           top = [m for m in methods if m["interest_score"] > 0][:500]
 
-          result = {"total_methods": len(methods), "interesting_methods": top, "all_methods": methods[:2000]}
+          game_classes = [m for m in methods if any(
+              k in m.get("class","").lower()
+              for k in ["game","runner","player","character","coin","score","enemy","level","spawn"]
+          )]
+
+          result = {
+              "total_methods": len(methods),
+              "interesting_methods": top,
+              "game_class_methods": game_classes[:300],
+              "all_methods": methods[:3000]
+          }
           with open("offsets.json","w") as f: json.dump(result, f, indent=2)
           print(f"offsets.json: {len(top)} interesting / {len(methods)} total methods")
           EOF
