@@ -75,10 +75,13 @@ jobs:
 
       - name: Download Il2CppDumper
         run: |
-          LATEST="https://github.com/Perfare/Il2CppDumper/releases/download/v6.7.46/Il2CppDumper-net6-linux.zip"
+          # Fetch latest release asset URL dynamically
+          LATEST=$(curl -s https://api.github.com/repos/Perfare/Il2CppDumper/releases/latest \
+            | python3 -c "import sys,json; assets=[a['browser_download_url'] for a in json.load(sys.stdin)['assets'] if 'net6' in a['name'] and 'win' not in a['name']]; print(assets[0])")
+          echo "Downloading: $LATEST"
           curl -L "$LATEST" -o Il2CppDumper.zip
           unzip -q Il2CppDumper.zip -d Il2CppDumper
-          chmod +x Il2CppDumper/Il2CppDumper 2>/dev/null || true
+          chmod +x Il2CppDumper/* 2>/dev/null || true
           ls -la Il2CppDumper/
 
       - name: Run Il2CppDumper
