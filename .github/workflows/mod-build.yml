@@ -70,12 +70,61 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/jmpews/Dobby dobby-src
 
-          # Fix: Dobby HEAD doesn't add source/ to include path — assembler-arm.cc
-          # can't find core/arch/Cpu.h. Inject include_directories after project() line.
-          sed -i '/^project(/a include_directories("${CMAKE_CURRENT_SOURCE_DIR}/source")' \
-            dobby-src/CMakeLists.txt
-          echo "=== CMakeLists.txt (first 10 lines after patch) ==="
-          head -10 dobby-src/CMakeLists.txt
+          echo "=== Dobby commit ==="
+          git -C dobby-src log --oneline -1
+
+          # ── Patch 1: arm64 asm uses Mach-O @PAGE/@PAGEOFF — fix to ELF syntax ──
+          ASM64="dobby-src/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm"
+          if [ -f "$ASM64" ]; then
+            # adrp xN, sym@PAGE  →  adrp xN, sym
+            sed -i 's/\([a-zA-Z_][a-zA-Z0-9_]*\)@PAGE\b/\1/g' "$ASM64"
+            # add  xN, xN, sym@PAGEOFF  →  add  xN, xN, :lo12:sym
+            sed -i 's/\([a-zA-Z_][a-zA-Z0-9_]*\)@PAGEOFF\b/:lo12:\1/g' "$ASM64"
+            echo "✓ arm64 asm @PAGE/@PAGEOFF patched"
+            grep -n "PAGEOFF\|@PAGE\|lo12" "$ASM64" || echo "  (no remaining reloc issues)"
+          fi
+
+          # ── Patch 2: arm32 Cpu.h include path ──
+          # Dobby HEAD moved/removed Cpu.h — find it and create a redirect if needed
+          echo "=== Cpu.h search ==="
+          find dobby-src/source -name "Cpu.h" 2>/dev/null || echo "Cpu.h NOT FOUND in source"
+          # Add ALL arch subdirs + source/ to CMake include path
+          sed -i '/^project(/a \
+include_directories(\
+  "${CMAKE_CURRENT_SOURCE_DIR}/source"\
+  "${CMAKE_CURRENT_SOURCE_DIR}/source/core"\
+  "${CMAKE_CURRENT_SOURCE_DIR}/source/core/arch"\
+  "${CMAKE_CURRENT_SOURCE_DIR}/source/core/arch/arm"\
+  "${CMAKE_CURRENT_SOURCE_DIR}/source/core/arch/arm64"\
+)' dobby-src/CMakeLists.txt
+          echo "=== CMakeLists.txt (first 15 lines) ==="
+          head -15 dobby-src/CMakeLists.txt
+
+          # If Cpu.h is genuinely missing, create a stub that includes the arch-specific one
+          if ! find dobby-src/source/core/arch -maxdepth 1 -name "Cpu.h" | grep -q .; then
+            echo "Creating Cpu.h stub..."
+            # Find the actual cpu header
+            ACTUAL=$(find dobby-src/source -name "Cpu*.h" 2>/dev/null | head -1)
+            echo "  Closest: $ACTUAL"
+            mkdir -p dobby-src/source/core/arch
+            cat > dobby-src/source/core/arch/Cpu.h <<'CPUEOF'
+#pragma once
+#ifdef __aarch64__
+#include "arm64/constants-arm64.h"
+#elif defined(__arm__)
+#include "arm/constants-arm.h"
+typedef uint32_t arm_inst_t;
+typedef uint16_t thumb1_inst_t;
+typedef uint32_t thumb2_inst_t;
+#elif defined(__i386__)
+#include "x86/constants-x86.h"
+#elif defined(__x86_64__)
+#include "x64/constants-x64.h"
+#endif
+CPUEOF
+            echo "✓ Cpu.h stub created"
+            cat dobby-src/source/core/arch/Cpu.h
+          fi
 
           build_abi() {
             ABI=$1; API=$2
@@ -89,8 +138,10 @@ jobs:
               -DPlugin.SymbolResolver=OFF \
               -DDOBBY_DEBUG=OFF \
               -DANDROID_STL=c++_static \
-              2>&1 || { echo "cmake configure failed for $ABI"; return 1; }
+              2>&1 | grep -v "Deprecation Warning\|cmake_minimum_required\|Update the VERSION\|tell CMake\|Call Stack\|syntax to tell" \
+              || { echo "cmake configure failed for $ABI"; return 1; }
             cmake --build dobby-src/build-$ABI --target dobby -j$(nproc) 2>&1 \
+              | grep -v "^$" \
               || { echo "cmake build failed for $ABI"; return 1; }
             ls -la dobby-src/build-$ABI/libdobby.a && echo "✓ $ABI OK" || echo "✗ $ABI no lib"
           }
@@ -105,7 +156,6 @@ jobs:
 
           echo "=== Dobby lib check ==="
           ls -la dobby_libs/arm64-v8a/ dobby_libs/armeabi-v7a/ 2>&1 || true
-          # Fail only if arm64 (primary ABI) did not build
           ls dobby_libs/arm64-v8a/libdobby.a || { echo "FATAL: arm64 Dobby build failed"; exit 1; }
 
       - name: Generate hook source from features JSON
