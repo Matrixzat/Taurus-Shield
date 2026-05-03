@@ -52,24 +52,19 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Install Android NDK
+      - name: Install Android NDK r25c
         run: |
-          NDK_VERSION="27.0.12077973"
-          SDK_ROOT="$HOME/android-sdk"
-          mkdir -p "$SDK_ROOT/cmdline-tools"
-
-          curl -s "https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip" \
-            -o cmdline-tools.zip
-          unzip -q cmdline-tools.zip -d "$SDK_ROOT/cmdline-tools"
-          mv "$SDK_ROOT/cmdline-tools/cmdline-tools" "$SDK_ROOT/cmdline-tools/latest" 2>/dev/null || true
-
-          export PATH="$SDK_ROOT/cmdline-tools/latest/bin:$PATH"
-          yes | sdkmanager --licenses > /dev/null 2>&1 || true
-          sdkmanager "ndk;$NDK_VERSION" > /dev/null 2>&1
-
-          echo "NDK_HOME=$SDK_ROOT/ndk/$NDK_VERSION" >> $GITHUB_ENV
-          echo "ANDROID_NDK_HOME=$SDK_ROOT/ndk/$NDK_VERSION" >> $GITHUB_ENV
-          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> $GITHUB_ENV
+          # Download NDK r25c directly — most compatible with Dobby, no sdkmanager needed
+          NDK_ZIP="android-ndk-r25c-linux.zip"
+          NDK_DIR="$HOME/android-ndk-r25c"
+          echo "Downloading NDK r25c..."
+          curl -fL "https://dl.google.com/android/repository/android-ndk-r25c-linux.zip" \
+            -o "$NDK_ZIP" 2>&1 | tail -3
+          unzip -q "$NDK_ZIP" -d "$HOME/"
+          rm "$NDK_ZIP"
+          echo "NDK_HOME=$NDK_DIR" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$NDK_DIR" >> $GITHUB_ENV
+          echo "NDK installed: $(ls $NDK_DIR/build/cmake/android.toolchain.cmake)"
 
       - name: Build Dobby (arm64-v8a + armeabi-v7a)
         run: |
@@ -77,26 +72,33 @@ jobs:
 
           build_abi() {
             ABI=$1; API=$2
-            echo "Building Dobby for $ABI..."
+            echo "--- Building Dobby $ABI ---"
             mkdir -p dobby-src/build-$ABI
             cmake -S dobby-src -B dobby-src/build-$ABI \
               -DCMAKE_TOOLCHAIN_FILE="$NDK_HOME/build/cmake/android.toolchain.cmake" \
               -DANDROID_ABI=$ABI \
               -DANDROID_NATIVE_API_LEVEL=$API \
               -DCMAKE_BUILD_TYPE=Release \
-              -DPlugin.SymbolResolver=OFF -DDOBBY_DEBUG=OFF \
-              > /dev/null 2>&1
-            cmake --build dobby-src/build-$ABI --target dobby -j$(nproc) > /dev/null 2>&1
-            ls dobby-src/build-$ABI/libdobby.a 2>/dev/null && echo "✓ $ABI" || echo "✗ $ABI failed"
+              -DPlugin.SymbolResolver=OFF \
+              -DDOBBY_DEBUG=OFF \
+              -DANDROID_STL=c++_static \
+              -DCMAKE_POLICY_DEFAULT_CMP0048=NEW \
+              2>&1 || { echo "cmake configure failed for $ABI"; return 1; }
+            cmake --build dobby-src/build-$ABI --target dobby -j$(nproc) 2>&1 \
+              || { echo "cmake build failed for $ABI"; return 1; }
+            ls -la dobby-src/build-$ABI/libdobby.a && echo "✓ $ABI OK" || echo "✗ $ABI no lib"
           }
 
-          build_abi arm64-v8a 26
-          build_abi armeabi-v7a 21
+          build_abi arm64-v8a 26 || true
+          build_abi armeabi-v7a 21 || true
 
           mkdir -p dobby_libs/arm64-v8a dobby_libs/armeabi-v7a
           cp dobby-src/build-arm64-v8a/libdobby.a    dobby_libs/arm64-v8a/  2>/dev/null || true
           cp dobby-src/build-armeabi-v7a/libdobby.a  dobby_libs/armeabi-v7a/ 2>/dev/null || true
           cp -r dobby-src/include dobby_include
+
+          # Fail only if arm64 (primary ABI) did not build
+          ls dobby_libs/arm64-v8a/libdobby.a || { echo "FATAL: arm64 Dobby build failed"; exit 1; }
 
       - name: Generate hook source from features JSON
         run: |
