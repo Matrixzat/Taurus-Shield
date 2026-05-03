@@ -70,6 +70,13 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/jmpews/Dobby dobby-src
 
+          # Fix: Dobby HEAD doesn't add source/ to include path — assembler-arm.cc
+          # can't find core/arch/Cpu.h. Inject include_directories after project() line.
+          sed -i '/^project(/a include_directories("${CMAKE_CURRENT_SOURCE_DIR}/source")' \
+            dobby-src/CMakeLists.txt
+          echo "=== CMakeLists.txt (first 10 lines after patch) ==="
+          head -10 dobby-src/CMakeLists.txt
+
           build_abi() {
             ABI=$1; API=$2
             echo "--- Building Dobby $ABI ---"
@@ -82,7 +89,6 @@ jobs:
               -DPlugin.SymbolResolver=OFF \
               -DDOBBY_DEBUG=OFF \
               -DANDROID_STL=c++_static \
-              -DCMAKE_POLICY_DEFAULT_CMP0048=NEW \
               2>&1 || { echo "cmake configure failed for $ABI"; return 1; }
             cmake --build dobby-src/build-$ABI --target dobby -j$(nproc) 2>&1 \
               || { echo "cmake build failed for $ABI"; return 1; }
@@ -97,6 +103,8 @@ jobs:
           cp dobby-src/build-armeabi-v7a/libdobby.a  dobby_libs/armeabi-v7a/ 2>/dev/null || true
           cp -r dobby-src/include dobby_include
 
+          echo "=== Dobby lib check ==="
+          ls -la dobby_libs/arm64-v8a/ dobby_libs/armeabi-v7a/ 2>&1 || true
           # Fail only if arm64 (primary ABI) did not build
           ls dobby_libs/arm64-v8a/libdobby.a || { echo "FATAL: arm64 Dobby build failed"; exit 1; }
 
