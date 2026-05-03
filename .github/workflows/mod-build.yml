@@ -69,62 +69,71 @@ jobs:
       - name: Build Dobby (arm64-v8a + armeabi-v7a)
         run: |
           git clone --depth=1 https://github.com/jmpews/Dobby dobby-src
-
-          echo "=== Dobby commit ==="
           git -C dobby-src log --oneline -1
 
-          # ── Patch 1: arm64 asm uses Mach-O @PAGE/@PAGEOFF — fix to ELF syntax ──
-          ASM64="dobby-src/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm"
-          if [ -f "$ASM64" ]; then
-            # adrp xN, sym@PAGE  →  adrp xN, sym
-            sed -i 's/\([a-zA-Z_][a-zA-Z0-9_]*\)@PAGE\b/\1/g' "$ASM64"
-            # add  xN, xN, sym@PAGEOFF  →  add  xN, xN, :lo12:sym
-            sed -i 's/\([a-zA-Z_][a-zA-Z0-9_]*\)@PAGEOFF\b/:lo12:\1/g' "$ASM64"
-            echo "✓ arm64 asm @PAGE/@PAGEOFF patched"
-            grep -n "PAGEOFF\|@PAGE\|lo12" "$ASM64" || echo "  (no remaining reloc issues)"
-          fi
+          python3 - dobby-src "$NDK_HOME" << 'PYEOF'
+          import sys, os, re, glob, subprocess
 
-          # ── Patch 2: arm32 Cpu.h include path ──
-          # Dobby HEAD moved/removed Cpu.h — find it and create a redirect if needed
-          echo "=== Cpu.h search ==="
-          find dobby-src/source -name "Cpu.h" 2>/dev/null || echo "Cpu.h NOT FOUND in source"
-          # Add ALL arch subdirs + source/ to CMake include path
-          sed -i '/^project(/a \
-include_directories(\
-  "${CMAKE_CURRENT_SOURCE_DIR}/source"\
-  "${CMAKE_CURRENT_SOURCE_DIR}/source/core"\
-  "${CMAKE_CURRENT_SOURCE_DIR}/source/core/arch"\
-  "${CMAKE_CURRENT_SOURCE_DIR}/source/core/arch/arm"\
-  "${CMAKE_CURRENT_SOURCE_DIR}/source/core/arch/arm64"\
-)' dobby-src/CMakeLists.txt
-          echo "=== CMakeLists.txt (first 15 lines) ==="
-          head -15 dobby-src/CMakeLists.txt
+          SRC  = sys.argv[1]
+          NDK  = sys.argv[2]
 
-          # If Cpu.h is genuinely missing, create a stub that includes the arch-specific one
-          if ! find dobby-src/source/core/arch -maxdepth 1 -name "Cpu.h" | grep -q .; then
-            echo "Creating Cpu.h stub..."
-            # Find the actual cpu header
-            ACTUAL=$(find dobby-src/source -name "Cpu*.h" 2>/dev/null | head -1)
-            echo "  Closest: $ACTUAL"
-            mkdir -p dobby-src/source/core/arch
-            cat > dobby-src/source/core/arch/Cpu.h <<'CPUEOF'
-#pragma once
-#ifdef __aarch64__
-#include "arm64/constants-arm64.h"
-#elif defined(__arm__)
-#include "arm/constants-arm.h"
-typedef uint32_t arm_inst_t;
-typedef uint16_t thumb1_inst_t;
-typedef uint32_t thumb2_inst_t;
-#elif defined(__i386__)
-#include "x86/constants-x86.h"
-#elif defined(__x86_64__)
-#include "x64/constants-x64.h"
-#endif
-CPUEOF
-            echo "✓ Cpu.h stub created"
-            cat dobby-src/source/core/arch/Cpu.h
-          fi
+          # ── Patch 1: arm64 asm @PAGE/@PAGEOFF → ELF syntax ──
+          asm = os.path.join(SRC, "source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm")
+          if os.path.exists(asm):
+              txt = open(asm).read()
+              txt = re.sub(r'([A-Za-z_]\w*)@PAGE\b', r'\1', txt)
+              txt = re.sub(r'([A-Za-z_]\w*)@PAGEOFF\b', r':lo12:\1', txt)
+              open(asm, 'w').write(txt)
+              print("Patch1 done: arm64 @PAGE/@PAGEOFF -> ELF")
+              for line in open(asm):
+                  if 'lo12' in line or '@PAGE' in line:
+                      print(" ", line.rstrip())
+          else:
+              print("WARNING: arm64 asm not found at", asm)
+
+          # ── Patch 2: CMakeLists — add include directories ──
+          cmake_path = os.path.join(SRC, "CMakeLists.txt")
+          cmake_txt  = open(cmake_path).read()
+          inject = (
+              "\ninclude_directories(\n"
+              '  "${CMAKE_CURRENT_SOURCE_DIR}/source"\n'
+              '  "${CMAKE_CURRENT_SOURCE_DIR}/source/core"\n'
+              '  "${CMAKE_CURRENT_SOURCE_DIR}/source/core/arch"\n'
+              '  "${CMAKE_CURRENT_SOURCE_DIR}/source/core/arch/arm"\n'
+              '  "${CMAKE_CURRENT_SOURCE_DIR}/source/core/arch/arm64"\n'
+              ")\n"
+          )
+          cmake_txt = re.sub(r'(project\([^)]*\))', r'\1' + inject, cmake_txt, count=1)
+          open(cmake_path, 'w').write(cmake_txt)
+          print("Patch2 done: include_directories injected")
+          print(open(cmake_path).read().split('\n')[0:12])
+
+          # ── Patch 3: create Cpu.h stub if missing ──
+          arch_dir = os.path.join(SRC, "source/core/arch")
+          cpu_h    = os.path.join(arch_dir, "Cpu.h")
+          existing = glob.glob(os.path.join(SRC, "source/**/*Cpu*.h"), recursive=True)
+          print("Cpu.h search:", existing or "NOT FOUND")
+          if not os.path.exists(cpu_h):
+              os.makedirs(arch_dir, exist_ok=True)
+              open(cpu_h, 'w').write(
+                  "#pragma once\n"
+                  "#ifdef __aarch64__\n"
+                  "#  include \"arm64/constants-arm64.h\"\n"
+                  "#elif defined(__arm__)\n"
+                  "#  include \"arm/constants-arm.h\"\n"
+                  "   typedef uint32_t arm_inst_t;\n"
+                  "   typedef uint16_t thumb1_inst_t;\n"
+                  "   typedef uint32_t thumb2_inst_t;\n"
+                  "#elif defined(__i386__)\n"
+                  "#  include \"x86/constants-x86.h\"\n"
+                  "#elif defined(__x86_64__)\n"
+                  "#  include \"x64/constants-x64.h\"\n"
+                  "#endif\n"
+              )
+              print("Patch3 done: Cpu.h stub created")
+          else:
+              print("Patch3: Cpu.h already exists")
+          PYEOF
 
           build_abi() {
             ABI=$1; API=$2
@@ -138,11 +147,10 @@ CPUEOF
               -DPlugin.SymbolResolver=OFF \
               -DDOBBY_DEBUG=OFF \
               -DANDROID_STL=c++_static \
-              2>&1 | grep -v "Deprecation Warning\|cmake_minimum_required\|Update the VERSION\|tell CMake\|Call Stack\|syntax to tell" \
-              || { echo "cmake configure failed for $ABI"; return 1; }
+              2>&1 | grep -Ev "Deprecation Warning|cmake_minimum_required|Update the VERSION|Call Stack|syntax to tell|Compatibility with" \
+              || { echo "cmake configure FAILED $ABI"; return 1; }
             cmake --build dobby-src/build-$ABI --target dobby -j$(nproc) 2>&1 \
-              | grep -v "^$" \
-              || { echo "cmake build failed for $ABI"; return 1; }
+              || { echo "cmake build FAILED $ABI"; return 1; }
             ls -la dobby-src/build-$ABI/libdobby.a && echo "✓ $ABI OK" || echo "✗ $ABI no lib"
           }
 
