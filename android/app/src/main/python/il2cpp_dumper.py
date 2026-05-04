@@ -424,37 +424,69 @@ def _try_resolve_from_candidates(so_data: bytes, segments: List,
 def _find_method_offsets_codegen_modules(
         so_data: bytes, segments: List, method_count: int) -> Optional[Dict[int, int]]:
     """
-    IL2CPP v24.2+ (metadata v29, v31 …): method pointers live in per-module
-    CodeGenModule structs, NOT in a flat CodeRegistration.methodPointers array.
+    Faithful Python port of Perfare/Il2CppDumper SectionHelper.FindCodeRegistration2019()
+    — the same binary that game-dump.yml downloads and runs on GitHub Actions.
+
+    For IL2CPP metadata v24.2+ (v29, v31 …) method pointers live in per-module
+    CodeGenModule structs, NOT a flat array in CodeRegistration.
 
     CodeGenModule layout (64-bit ARM):
       +0  : const char* moduleName        → "AssemblyName.dll\0"
       +8  : uint64_t    methodPointerCount
-      +16 : void**      methodPointers    → per-module function pointer array
-      ...
+      +16 : void**      methodPointers    → per-module function-pointer array
 
-    Algorithm (matches djkaty/Il2CppInspector ImageScan.cs):
-      1. Find "mscorlib.dll\0" string → its VA
-      2. Bulk-scan SO as uint64 array; entries equal to that VA sit at the
-         start of a CodeGenModule.moduleName field → CodeGenModule struct VA
-      3. Validate each candidate: check methodPointerCount + methodPointers
-      4. Extend to ALL CodeGenModules: scan every 8-byte-aligned word; if it
-         points to a readable .dll string and its +8/+16 neighbours are valid,
-         it is another CodeGenModule
-      5. Find the CodeGenModules[] pointer array: longest contiguous run of
-         words that all point to known CodeGenModule VAs
-      6. Walk modules in array order; accumulate global method indices and
-         convert each function VA to a file offset
+    Perfare's 4-level pointer chain (SectionHelper.cs FindCodeRegistration2019):
+      dllva   = VA of "mscorlib.dll\0" string
+      refva   = VA that *contains* dllva  → CodeGenModule.moduleName field
+                = CodeGenModule struct base (moduleName is first field)
+      refva2  = VA that *contains* refva  → entry in CodeGenModules[] array
+      candidate = refva2 - i*8           → CodeGenModules[0] (array start)
+      refva3  = VA that *contains* candidate → CodeRegistration.codeGenModules
+      validate: u64(refva3 - 8) == i + 1 (= codeGenModulesCount)
+
+    Performance: builds a reverse-pointer map (VA→foffs) once in O(n) time,
+    making every FindReference() call an O(1) dict lookup instead of O(n) scan.
     """
-    # ── Bulk uint64 view of entire SO ─────────────────────────────────────────
+    # ── Build uint64 array view of entire SO ──────────────────────────────────
     aligned_len = (len(so_data) // 8) * 8
     all_ptrs = array.array('Q')
     all_ptrs.frombytes(so_data[:aligned_len])
     n = len(all_ptrs)
 
-    # ── Step 1: find "mscorlib.dll\0" string and its VA(s) ───────────────────
-    mscorlib_vas: set = set()
+    # VA range of all mapped segments — used to filter false-positive pointers
+    seg_min = min(va for va, _, _ in segments)
+    seg_max = max(va + sz for va, _, sz in segments)
+
+    # ── Build reverse map: VA value → [file offsets containing that VA] ───────
+    # Only store entries whose value falls within the SO's mapped VA range.
+    # This keeps RAM down (~20-30 MB for a typical 30 MB game SO).
+    rev: Dict[int, List[int]] = {}
+    for i in range(n):
+        p = int(all_ptrs[i])
+        if seg_min <= p < seg_max:
+            if p not in rev:
+                rev[p] = []
+            rev[p].append(i * 8)
+
+    # ── FindReference equivalent: VA → list of VAs that contain a ptr to it ──
+    def find_refs(target_va: int) -> List[int]:
+        result: List[int] = []
+        for fo in rev.get(target_va, []):
+            va = _foff_to_va(segments, fo)
+            if va:
+                result.append(va)
+        return result
+
+    # ── Read u64 at a VA (returns None on miss) ────────────────────────────────
+    def ru64(va: int) -> Optional[int]:
+        fo = _va_to_foff(segments, va)
+        if fo is None or fo + 8 > len(so_data):
+            return None
+        return struct.unpack_from('<Q', so_data, fo)[0]
+
+    # ── Step 1: find "mscorlib.dll\0" string VAs ──────────────────────────────
     needle = b'mscorlib.dll\x00'
+    mscorlib_vas: List[int] = []
     pos = 0
     while True:
         pos = so_data.find(needle, pos)
@@ -462,103 +494,107 @@ def _find_method_offsets_codegen_modules(
             break
         va = _foff_to_va(segments, pos)
         if va:
-            mscorlib_vas.add(va)
+            mscorlib_vas.append(va)
         pos += 1
 
     if not mscorlib_vas:
-        print("  mscorlib.dll string not found — skipping CodeGenModule scan")
+        print("  mscorlib.dll not found in binary")
+        return None
+    print(f"  mscorlib.dll string: {len(mscorlib_vas)} hit(s)")
+
+    # ── Steps 2-4: unwind 4-level chain ───────────────────────────────────────
+    # Perfare v27+ (mscorlib is LAST module): i walks backward from 0 to ~400
+    # candidate = refva2 - i*8 = CodeGenModules[0] start when i == imageCount-1
+    # Validation: u64(refva3 - 8) == i + 1  (== codeGenModulesCount)
+
+    codegen_array_va:  Optional[int] = None   # VA of CodeGenModules[0]
+    codegen_mod_count: Optional[int] = None   # codeGenModulesCount
+
+    for dllva in mscorlib_vas:
+        # Step 2: find CodeGenModule structs whose moduleName == dllva
+        for refva in find_refs(dllva):
+            # mscorlib always has methods — quick sanity on methodPointerCount
+            mc = ru64(refva + 8)
+            if mc is None or mc == 0 or mc > 500_000:
+                continue
+
+            # Step 3: find entries in CodeGenModules[] that point to this module
+            for refva2 in find_refs(refva):
+
+                # Step 4: walk backward — candidate is potential CodeGenModules[0]
+                # For v27+ mscorlib is last, so i == imageCount-1 is the hit
+                for i in range(400):
+                    candidate = refva2 - i * 8
+
+                    # Find CodeRegistration.codeGenModules (= ptr to candidate)
+                    for refva3 in find_refs(candidate):
+                        count_val = ru64(refva3 - 8)
+                        if count_val is None:
+                            continue
+                        # Key match: codeGenModulesCount == i + 1
+                        if count_val != i + 1 or not (1 <= count_val <= 400):
+                            continue
+
+                        # Extra validation: dereference the found array pointer
+                        array_va = ru64(refva3)
+                        if array_va is None or array_va != candidate:
+                            continue
+                        # First module ptr must map to readable memory
+                        first_mod_va = ru64(array_va)
+                        if first_mod_va is None:
+                            continue
+                        if _va_to_foff(segments, first_mod_va) is None:
+                            continue
+                        # First module's moduleName must contain .dll
+                        first_name_va = ru64(first_mod_va)
+                        if first_name_va is None:
+                            continue
+                        nfo = _va_to_foff(segments, first_name_va)
+                        if nfo is None or b'.dll' not in so_data[nfo: nfo + 128]:
+                            continue
+
+                        # ── Found it ──────────────────────────────────────────
+                        codegen_array_va  = candidate
+                        codegen_mod_count = int(count_val)
+                        print(f"  CodeRegistration.codeGenModules @ 0x{refva3:x}")
+                        print(f"  codeGenModulesCount = {codegen_mod_count}")
+                        print(f"  CodeGenModules[0]   @ VA 0x{codegen_array_va:x}")
+                        break
+
+                    if codegen_array_va:
+                        break
+                if codegen_array_va:
+                    break
+            if codegen_array_va:
+                break
+        if codegen_array_va:
+            break
+
+    if codegen_array_va is None:
+        print("  4-level chain failed — no valid CodeRegistration found")
         return None
 
-    # ── Step 2: scan for pointers to mscorlib VA → validate CodeGenModules ───
-    # ptrs[i] == mscorlib_va means file offset i*8 is start of a CodeGenModule
-    valid_module_vas: set = set()
-    for i in range(n - 2):
-        if all_ptrs[i] not in mscorlib_vas:
-            continue
-        m_count  = all_ptrs[i + 1]
-        m_ptrs_v = all_ptrs[i + 2]
-        if m_count == 0 or m_count > 500_000:
-            continue
-        if not m_ptrs_v:
-            continue
-        pfo = _va_to_foff(segments, m_ptrs_v)
-        if pfo is None or pfo + m_count * 8 > len(so_data):
-            continue
-        mod_va = _foff_to_va(segments, i * 8)
-        if mod_va:
-            valid_module_vas.add(mod_va)
-
-    if not valid_module_vas:
-        print("  No valid CodeGenModule found for mscorlib — skipping")
-        return None
-
-    print(f"  mscorlib CodeGenModule(s) found: {len(valid_module_vas)}")
-
-    # ── Step 3: find ALL CodeGenModule structs in the binary ──────────────────
-    # A valid CodeGenModule has its moduleName field pointing to a .dll string
-    all_module_vas: set = set(valid_module_vas)
-    for i in range(n - 2):
-        name_va  = all_ptrs[i]
-        m_count  = all_ptrs[i + 1]
-        m_ptrs_v = all_ptrs[i + 2]
-        if not name_va:
-            continue
-        name_fo = _va_to_foff(segments, name_va)
-        if name_fo is None or name_fo + 4 >= len(so_data):
-            continue
-        if b'.dll' not in so_data[name_fo: name_fo + 128]:
-            continue
-        if m_count == 0 or m_count > 500_000:
-            continue
-        if not m_ptrs_v:
-            continue
-        pfo = _va_to_foff(segments, m_ptrs_v)
-        if pfo is None or pfo + m_count * 8 > len(so_data):
-            continue
-        mod_va = _foff_to_va(segments, i * 8)
-        if mod_va:
-            all_module_vas.add(mod_va)
-
-    print(f"  Total CodeGenModule structs identified: {len(all_module_vas)}")
-    if len(all_module_vas) < 2:
-        print("  Too few modules — CodeGenModule scan unreliable")
-        return None
-
-    # ── Step 4: find the CodeGenModules[] pointer array ──────────────────────
-    # It is the longest contiguous 8-byte-aligned run of pointers that all
-    # resolve to a known CodeGenModule VA.
-    best_run: List[int] = []
-    cur_run:  List[int] = []
-    for i in range(n):
-        if int(all_ptrs[i]) in all_module_vas:
-            cur_run.append(int(all_ptrs[i]))
-        else:
-            if len(cur_run) > len(best_run):
-                best_run = cur_run
-            cur_run = []
-    if len(cur_run) > len(best_run):
-        best_run = cur_run
-
-    if not best_run:
-        print("  Could not locate CodeGenModules[] pointer array")
-        return None
-
-    print(f"  CodeGenModules[] array: {len(best_run)} module(s)")
-
-    # ── Step 5: walk modules in array order → build method index → file offset ─
+    # ── Step 5: walk CodeGenModules[] and build global_idx → file_offset ──────
+    # CodeGenModules[] is an array of *pointers* to CodeGenModule structs.
+    # 0-method modules are included (they advance global_idx by 0, no entries).
     offsets: Dict[int, int] = {}
     global_idx = 0
-    for mod_va in best_run:
+
+    for mod_i in range(codegen_mod_count):
+        mod_va = ru64(codegen_array_va + mod_i * 8)
+        if mod_va is None:
+            continue
         mod_fo = _va_to_foff(segments, mod_va)
         if mod_fo is None or mod_fo + 24 > len(so_data):
             continue
+
         m_count  = struct.unpack_from('<Q', so_data, mod_fo + 8)[0]
         m_ptrs_v = struct.unpack_from('<Q', so_data, mod_fo + 16)[0]
 
         if m_count > 500_000:
-            continue
+            continue                         # bogus — skip without advancing
         if m_count == 0 or not m_ptrs_v:
-            global_idx += int(m_count)
+            global_idx += int(m_count)       # 0-method module: advances by 0
             continue
 
         pfo = _va_to_foff(segments, m_ptrs_v)
@@ -570,11 +606,12 @@ def _find_method_offsets_codegen_modules(
             g_idx = global_idx + local_idx
             if g_idx >= method_count:
                 break
-            va = struct.unpack_from('<Q', so_data, pfo + local_idx * 8)[0]
-            if va:
-                fo = _va_to_foff(segments, va)
+            fn_va = struct.unpack_from('<Q', so_data, pfo + local_idx * 8)[0]
+            if fn_va:
+                fo = _va_to_foff(segments, fn_va)
                 if fo is not None:
                     offsets[g_idx] = fo
+
         global_idx += int(m_count)
 
     return offsets if offsets else None
