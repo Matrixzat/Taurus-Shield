@@ -1,0 +1,343 @@
+name: Cocos2d-x Cloud Analyser
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'Release asset ID of the slim ZIP (from analyze-queue release)'
+        required: true
+      job_id:
+        description: 'Tracking ID — used to name the output artifact'
+        required: true
+
+jobs:
+  analyse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download input file
+        run: |
+          curl -L \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
+            -o input.zip
+          echo "Downloaded: $(du -sh input.zip)"
+
+      - name: Analyse Cocos2d-x game
+        run: |
+          python3 - <<'PYEOF'
+          import zipfile, os, re, json, sys, struct, subprocess
+
+          os.makedirs("output", exist_ok=True)
+          os.makedirs("game_files", exist_ok=True)
+
+          # ── 1. Extract slim ZIP ───────────────────────────────────────────────
+          meta = {}
+          so_path      = None
+          script_files = []   # list of (rel_path, bytes)
+
+          with zipfile.ZipFile("input.zip") as z:
+              names = z.namelist()
+              print(f"ZIP entries ({len(names)}): {names[:20]}")
+
+              if "_meta.json" in names:
+                  meta = json.loads(z.read("_meta.json"))
+                  print(f"Meta: {meta}")
+
+              for n in names:
+                  if n == "_meta.json" or n.endswith("/"):
+                      continue
+                  data = z.read(n)
+                  # Save to game_files/
+                  dest = os.path.join("game_files", n)
+                  os.makedirs(os.path.dirname(dest) if os.path.dirname(dest) else ".", exist_ok=True)
+                  with open(dest, "wb") as f:
+                      f.write(data)
+
+                  base = os.path.basename(n)
+                  if base == "libcocos2dcpp.so":
+                      so_path = dest
+                      print(f"  libcocos2dcpp.so  {len(data)//1024} KB")
+                  elif any(n.endswith(ext) for ext in (".lua", ".luac", ".js", ".jsc", ".js.enc")):
+                      script_files.append((n, data))
+
+          # ── 2. Detect game type ───────────────────────────────────────────────
+          hint = meta.get("game_type_hint", "")
+
+          # Auto-detect from contents if hint not reliable
+          has_lua    = any(n.endswith((".lua", ".luac")) for n, _ in script_files)
+          has_js     = any(n.endswith((".js", ".jsc", ".js.enc")) for n, _ in script_files)
+          has_so     = so_path is not None
+
+          if hint == "lua" or (not hint and has_lua):
+              game_type = "lua"
+          elif hint == "js" or (not hint and has_js):
+              game_type = "js"
+          else:
+              game_type = "native"
+
+          print(f"Game type: {game_type.upper()}  (hint={hint}, lua={has_lua}, js={has_js}, so={has_so})")
+
+          # ── 3. Keyword scoring ────────────────────────────────────────────────
+          KEYWORDS = {
+              "coin":9,"gold":9,"gem":9,"diamond":9,"cash":8,"money":8,
+              "health":8,"hp":8,"life":8,"lives":7,"heart":7,"energy":7,
+              "unlock":8,"premium":8,"vip":7,"purchase":8,"buy":7,
+              "speed":7,"damage":6,"score":7,"point":6,"reward":7,
+              "maxhp":9,"maxhealth":9,"maxlevel":8,"maxstage":8,
+              "infinite":10,"unlimited":10,"invincib":10,"godmode":10,
+              "revive":8,"respawn":7,"cheat":10,"hack":10,
+              "mana":7,"shield":7,"armor":7,"stamina":7,"skill":6,
+              "cooldown":7,"timer":6,"time":4,"level":5,"stage":5,
+              "add":2,"get":1,"set":2,"is":1,"has":2,"can":2,
+          }
+
+          def score_name(name):
+              low = name.lower()
+              return sum(pts for kw, pts in KEYWORDS.items() if kw in low)
+
+          # ── 4a. Native ARM64 — parse ELF symbols ──────────────────────────────
+          if game_type == "native":
+              interesting = []
+
+              if not has_so:
+                  print("ERROR: libcocos2dcpp.so not found in upload — cannot analyse native game")
+                  result = {"game_type": "native", "interesting": [],
+                            "error": "libcocos2dcpp.so not found in upload"}
+                  with open("output/cocos_analysis.json", "w") as f:
+                      json.dump(result, f, indent=2)
+                  sys.exit(0)
+
+              # ── Parse ELF to build VA→file-offset map ────────────────────────
+              with open(so_path, "rb") as f:
+                  elf = f.read()
+
+              def u8(off):   return elf[off]
+              def u16le(off): return struct.unpack_from("<H", elf, off)[0]
+              def u32le(off): return struct.unpack_from("<I", elf, off)[0]
+              def u64le(off): return struct.unpack_from("<Q", elf, off)[0]
+
+              # ELF64 header
+              e_ident = elf[:16]
+              if e_ident[:4] != b'\x7fELF':
+                  print("ERROR: Not a valid ELF file")
+                  sys.exit(1)
+              is64     = (e_ident[4] == 2)   # EI_CLASS: 2 = ELFCLASS64
+              e_phoff  = u64le(32) if is64 else u32le(28)
+              e_phentsize = u16le(54) if is64 else u16le(42)
+              e_phnum  = u16le(56) if is64 else u16le(44)
+              e_shoff  = u64le(40) if is64 else u32le(32)
+              e_shentsize = u16le(58) if is64 else u16le(46)
+              e_shnum  = u16le(60) if is64 else u16le(48)
+              e_shstrndx = u16le(62) if is64 else u16le(50)
+              print(f"ELF: {'64-bit' if is64 else '32-bit'}, {e_phnum} segments, {e_shnum} sections")
+
+              # Build VA→file-offset map from LOAD segments
+              segments = []
+              for i in range(e_phnum):
+                  off = e_phoff + i * e_phentsize
+                  p_type = u32le(off)
+                  if p_type != 1:  # PT_LOAD
+                      continue
+                  if is64:
+                      p_offset = u64le(off + 8)
+                      p_vaddr  = u64le(off + 16)
+                      p_filesz = u64le(off + 32)
+                  else:
+                      p_offset = u32le(off + 4)
+                      p_vaddr  = u32le(off + 8)
+                      p_filesz = u32le(off + 16)
+                  segments.append((p_vaddr, p_offset, p_filesz))
+              print(f"LOAD segments: {len(segments)}")
+
+              def va_to_file_offset(va):
+                  for vaddr, foffset, fsz in segments:
+                      if vaddr <= va < vaddr + fsz:
+                          return foffset + (va - vaddr)
+                  return None
+
+              # Find section string table
+              strtab_data = b""
+              if e_shstrndx < e_shnum and e_shoff > 0:
+                  sh_off = e_shoff + e_shstrndx * e_shentsize
+                  if is64:
+                      sh_name_off = u64le(sh_off + 24)
+                      sh_size     = u64le(sh_off + 32)
+                  else:
+                      sh_name_off = u32le(sh_off + 16)
+                      sh_size     = u32le(sh_off + 20)
+                  strtab_data = elf[sh_name_off: sh_name_off + sh_size]
+
+              def sh_name(idx):
+                  end = strtab_data.find(b'\x00', idx)
+                  return strtab_data[idx:end].decode("utf-8", errors="replace") if end != -1 else ""
+
+              # Locate .dynsym + .dynstr sections
+              dynsym_off = dynsym_sz = dynsym_entsize = 0
+              dynstr_off = dynstr_sz = 0
+
+              for i in range(e_shnum):
+                  sh_off = e_shoff + i * e_shentsize
+                  if is64:
+                      sh_name_idx = u32le(sh_off)
+                      sh_type     = u32le(sh_off + 4)
+                      sh_offset   = u64le(sh_off + 24)
+                      sh_size     = u64le(sh_off + 32)
+                      sh_entsize  = u64le(sh_off + 56)
+                  else:
+                      sh_name_idx = u32le(sh_off)
+                      sh_type     = u32le(sh_off + 4)
+                      sh_offset   = u32le(sh_off + 16)
+                      sh_size     = u32le(sh_off + 20)
+                      sh_entsize  = u32le(sh_off + 36)
+
+                  sname = sh_name(sh_name_idx)
+                  if sh_type == 11 and sname == ".dynsym":   # SHT_DYNSYM
+                      dynsym_off = sh_offset; dynsym_sz = sh_size; dynsym_entsize = sh_entsize
+                  elif sh_type == 3 and sname == ".dynstr":  # SHT_STRTAB
+                      dynstr_off = sh_offset; dynstr_sz  = sh_size
+
+              def read_str(base, idx):
+                  end = elf.find(b'\x00', base + idx)
+                  return elf[base + idx: end].decode("utf-8", errors="replace") if end != -1 else ""
+
+              # Parse symbol table
+              entry_sz = dynsym_entsize if dynsym_entsize > 0 else (24 if is64 else 16)
+              syms_found = 0
+              for off in range(dynsym_off, dynsym_off + dynsym_sz, entry_sz):
+                  if is64:
+                      st_name  = u32le(off)
+                      st_info  = u8(off + 4)
+                      st_value = u64le(off + 8)
+                      st_size  = u64le(off + 16)
+                  else:
+                      st_name  = u32le(off)
+                      st_value = u32le(off + 4)
+                      st_info  = u8(off + 12)
+
+                  sym_type    = st_info & 0xF
+                  sym_binding = st_info >> 4
+                  # STT_FUNC = 2, STT_OBJECT = 1
+                  if sym_type not in (1, 2) or st_value == 0:
+                      continue
+
+                  name = read_str(dynstr_off, st_name)
+                  if not name or name.startswith("__"):
+                      continue
+
+                  # VA → file offset
+                  file_off = va_to_file_offset(st_value)
+                  if file_off is None:
+                      continue
+
+                  sc  = score_name(name)
+                  sym_type_label = "FUNC" if sym_type == 2 else "OBJECT"
+                  interesting.append({
+                      "name":   name,
+                      "offset": f"0x{file_off:x}",
+                      "type":   sym_type_label,
+                      "score":  sc,
+                  })
+                  syms_found += 1
+
+              interesting.sort(key=lambda x: -x["score"])
+              print(f"Symbols: {syms_found} total, {sum(1 for s in interesting if s['score']>0)} scored")
+
+              result = {"game_type": "native", "interesting": interesting}
+
+          # ── 4b. Lua / JS — script value scan ─────────────────────────────────
+          else:
+              values = []
+              BOOL_RE  = re.compile(r'\b(true|false)\b', re.IGNORECASE)
+
+              for rel_path, raw_data in script_files:
+                  try:
+                      text = raw_data.decode("utf-8", errors="replace")
+                  except Exception:
+                      continue
+
+                  for lineno, line in enumerate(text.splitlines(), 1):
+                      # Skip comments
+                      stripped = line.strip()
+                      if stripped.startswith("--") or stripped.startswith("//") or stripped.startswith("#"):
+                          continue
+
+                      # Match: varName = number  (Lua/JS assignment)
+                      m = re.match(
+                          r'^(?:local\s+)?'
+                          r'([\w.:\[\]"\']+)\s*=\s*'
+                          r'(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*(?:--.*|//.*)?$',
+                          stripped)
+                      if m:
+                          var_name = m.group(1)
+                          val_str  = m.group(2)
+                          sc       = score_name(var_name)
+                          values.append({
+                              "file":     rel_path,
+                              "var":      var_name,
+                              "value":    val_str,
+                              "line":     lineno,
+                              "score":    sc,
+                              "find_str": stripped,
+                              "is_bool":  False,
+                          })
+                          continue
+
+                      # Match: varName = true/false
+                      mb = re.match(
+                          r'^(?:local\s+)?'
+                          r'([\w.:\[\]"\']+)\s*=\s*(true|false)\s*(?:--.*|//.*)?$',
+                          stripped, re.IGNORECASE)
+                      if mb:
+                          var_name = mb.group(1)
+                          val_str  = mb.group(2).lower()
+                          sc       = score_name(var_name)
+                          values.append({
+                              "file":     rel_path,
+                              "var":      var_name,
+                              "value":    val_str,
+                              "line":     lineno,
+                              "score":    sc,
+                              "find_str": stripped,
+                              "is_bool":  True,
+                          })
+
+              values.sort(key=lambda x: -x["score"])
+              print(f"Script values: {len(values)} found")
+              result = {"game_type": game_type, "interesting": values}
+
+          # ── 5. Write output ───────────────────────────────────────────────────
+          out_path = "output/cocos_analysis.json"
+          with open(out_path, "w", encoding="utf-8") as f:
+              json.dump(result, f, indent=2, ensure_ascii=False)
+
+          total = len(result["interesting"])
+          scored = sum(1 for x in result["interesting"] if x.get("score", 0) > 0)
+          print(f"cocos_analysis.json: {total} entries, {scored} scored")
+          print(f"Output size: {os.path.getsize(out_path)//1024} KB")
+          PYEOF
+
+      - name: Upload results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cocos-dump-${{ inputs.job_id }}
+          path: output/
+          retention-days: 7
+
+      - name: Delete input asset
+        run: |
+          curl -s -L -X DELETE \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}"
+          echo "Input asset deleted"
+
+      - name: Summary
+        run: |
+          echo "## Cocos2d-x Analysis Complete ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- **Job ID:** ${{ inputs.job_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Artifact:** cocos-dump-${{ inputs.job_id }} (7-day retention)" >> $GITHUB_STEP_SUMMARY
+          [ -f output/cocos_analysis.json ] && echo "- **Output size:** $(du -sh output/cocos_analysis.json | cut -f1)" >> $GITHUB_STEP_SUMMARY || true
