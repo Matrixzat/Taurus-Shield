@@ -415,9 +415,9 @@ class _ModEngineScreenState extends State<ModEngineScreen>
   Widget _buildBody() {
     switch (_step) {
       case 0: return _buildPickStep();
-      case 1: return _buildProcessingStep('Analysing game…', 'Extracting IL2CPP symbols via GitHub Actions');
+      case 1: return _buildProcessingStep('Analysing game…', 'Extracting IL2CPP symbols via Taurus cloud engine');
       case 2: return _buildFeatureSelectStep();
-      case 3: return _buildProcessingStep('Building mod APK…', 'Compiling hooks and patching game APK via GitHub Actions');
+      case 3: return _buildProcessingStep('Building mod APK…', 'Patching binary and rebuilding game APK via Taurus cloud engine');
       case 4: return _buildDoneStep();
       default: return _buildPickStep();
     }
@@ -453,14 +453,14 @@ class _ModEngineScreenState extends State<ModEngineScreen>
                 ]),
                 const SizedBox(height: 12),
                 const Text(
-                  'Dumps the game\'s C# symbols, lets you pick which functions to hook '
-                  '(coins, speed, unlock checks, etc.), then builds and signs a custom '
-                  'modded APK — all via GitHub Actions, no server needed.',
+                  'Dumps the game\'s C# symbols, lets you pick which functions to patch '
+                  '(coins, speed, unlock checks, etc.), then builds a custom '
+                  'modded APK — fully automated in the cloud, no root needed.',
                   style: TextStyle(color: Colors.white70, fontSize: 13, height: 1.5),
                 ),
                 const SizedBox(height: 16),
                 Wrap(spacing: 8, runSpacing: 8, children: [
-                  _chip(Icons.cloud_queue, 'GitHub Actions'),
+                  _chip(Icons.cloud_queue, 'Cloud Powered'),
                   _chip(Icons.code, 'Static Patch'),
                   _chip(Icons.shield, 'No Root Needed'),
                   _chip(Icons.gamepad, 'Any Unity Game'),
@@ -537,8 +537,8 @@ class _ModEngineScreenState extends State<ModEngineScreen>
 
   Widget _howItWorksCard() {
     final steps = [
-      ('1', 'Upload game APK to GitHub', Icons.upload),
-      ('2', 'Actions extracts libil2cpp.so + metadata', Icons.layers),
+      ('1', 'Upload game APK to the cloud', Icons.upload),
+      ('2', 'Cloud engine extracts libil2cpp.so + metadata', Icons.layers),
       ('3', 'Il2CppDumper maps all C# methods + file offsets', Icons.list_alt),
       ('4', 'You pick which functions to patch', Icons.tune),
       ('5', 'Python writes ARM64 bytes directly into libil2cpp.so', Icons.build),
