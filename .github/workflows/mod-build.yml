@@ -1,4 +1,4 @@
-name: Mod Builder (Unity IL2CPP)
+name: Mod Builder (Unity IL2CPP — Static Patch)
 
 on:
   workflow_dispatch:
@@ -14,14 +14,20 @@ on:
         required: true
         default: 'game'
       features_json:
-        description: 'JSON array of features: [{name,offset,type,default_val,max_val}]'
+        description: |
+          JSON array of patches. Each entry:
+            { "name": "...", "file_offset": "0xHEX", "type": "int|void|float", "value": N }
+          file_offset = the Offset field from il2cpp dump (NOT RVA).
+          type=int   → MOVZ W0, #lo  /  MOVK W0, #hi, LSL16  /  RET  (returns value as int)
+          type=void  → RET  (no-op, suppresses the function)
+          type=float → embeds IEEE-754 float via LDR S0 + RET
         required: true
         default: '[]'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     permissions:
       contents: write
 
@@ -46,288 +52,122 @@ jobs:
             -o game.apk
           echo "APK size: $(du -sh game.apk)"
 
-      - name: Set up JDK 17
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Install Android NDK r25c
-        run: |
-          NDK_ZIP="android-ndk-r25c-linux.zip"
-          NDK_DIR="$HOME/android-ndk-r25c"
-          echo "Downloading NDK r25c..."
-          curl -fL "https://dl.google.com/android/repository/android-ndk-r25c-linux.zip" \
-            -o "$NDK_ZIP" 2>&1 | tail -3
-          unzip -q "$NDK_ZIP" -d "$HOME/"
-          rm "$NDK_ZIP"
-          echo "NDK_HOME=$NDK_DIR" >> $GITHUB_ENV
-          echo "ANDROID_NDK_HOME=$NDK_DIR" >> $GITHUB_ENV
-          echo "NDK installed: $(ls $NDK_DIR/build/cmake/android.toolchain.cmake)"
-
-      - name: Download ShadowHook v2.0.0 (ByteDance, prebuilt)
-        run: |
-          # ShadowHook is the 2025/2026 standard for Android inline hooking.
-          # Dobby is abandoned — open build bugs since 2024, never fixed.
-          # ShadowHook v2.0.0 (Jul 2025) ships prebuilt .so via Maven Central AAR.
-          VERSION="2.0.0"
-          AAR_URL="https://repo1.maven.org/maven2/com/bytedance/android/shadowhook/${VERSION}/shadowhook-${VERSION}.aar"
-          echo "Downloading ShadowHook ${VERSION} AAR..."
-          curl -fL "$AAR_URL" -o shadowhook.aar
-          echo "AAR size: $(du -sh shadowhook.aar)"
-
-          # AAR is a ZIP — extract native libs and headers
-          unzip -q shadowhook.aar -d shadowhook_aar
-          echo "=== AAR contents ==="
-          find shadowhook_aar -type f | sort
-
-          # Copy .so files per ABI
-          mkdir -p shadowhook_libs/arm64-v8a shadowhook_libs/armeabi-v7a
-          cp shadowhook_aar/jni/arm64-v8a/libshadowhook.so    shadowhook_libs/arm64-v8a/  2>/dev/null || true
-          cp shadowhook_aar/jni/armeabi-v7a/libshadowhook.so  shadowhook_libs/armeabi-v7a/ 2>/dev/null || true
-
-          # Copy header if present; otherwise write the minimal API we need
-          mkdir -p shadowhook_include
-          if find shadowhook_aar -name "shadowhook.h" | grep -q .; then
-            cp "$(find shadowhook_aar -name 'shadowhook.h' | head -1)" shadowhook_include/
-            echo "Header found in AAR"
-          else
-            printf '%s\n' \
-              '#pragma once' \
-              '#include <stdbool.h>' \
-              '#ifdef __cplusplus' \
-              'extern "C" {' \
-              '#endif' \
-              '#define SHADOWHOOK_MODE_SHARED 0' \
-              '#define SHADOWHOOK_MODE_UNIQUE 1' \
-              'int   shadowhook_init(int mode, bool debuggable);' \
-              'void *shadowhook_hook_func_addr(void *func_addr, void *new_addr, void **orig_addr);' \
-              'int   shadowhook_unhook(void *stub);' \
-              '#ifdef __cplusplus' \
-              '}' \
-              '#endif' \
-              > shadowhook_include/shadowhook.h
-            echo "Header written from known API"
-          fi
-
-          echo "=== ShadowHook libs ==="
-          ls -la shadowhook_libs/arm64-v8a/ shadowhook_libs/armeabi-v7a/ 2>&1 || true
-          ls shadowhook_libs/arm64-v8a/libshadowhook.so || { echo "FATAL: arm64 libshadowhook.so missing"; exit 1; }
-
-      - name: Generate hook source from features JSON
+      - name: Static-patch libil2cpp.so and repack APK
         run: |
           python3 - <<'PYEOF'
-          import json, os
+          import json, os, struct, shutil, zipfile
 
           features_raw = os.environ.get("FEATURES_JSON", "[]")
           game_name    = os.environ.get("GAME_NAME", "game")
 
-          try:    features = json.loads(features_raw)
-          except: features = []
+          try:
+              features = json.loads(features_raw)
+          except Exception as e:
+              print(f"WARN: could not parse features JSON: {e}")
+              features = []
 
-          print(f"Generating always-on hooks: {len(features)} features for '{game_name}'")
+          # ── ARM64 instruction builders ─────────────────────────────────────────
+          def movz_w0(imm16, shift=0):
+              """MOVZ W0, #imm16, LSL #shift"""
+              hw    = shift // 16
+              instr = (0b0_10_100101 << 23) | (hw << 21) | ((imm16 & 0xFFFF) << 5) | 0
+              return struct.pack('<I', instr)
 
-          # Always-on mode: hooks fire the instant the game loads, no external app needed.
-          # Each hook unconditionally returns the baked-in value from the features JSON.
-          hook_decls, hook_installs = [], []
+          def movk_w0(imm16, shift=0):
+              """MOVK W0, #imm16, LSL #shift"""
+              hw    = shift // 16
+              instr = (0b0_11_100101 << 23) | (hw << 21) | ((imm16 & 0xFFFF) << 5) | 0
+              return struct.pack('<I', instr)
 
-          for i, feat in enumerate(features):
-              name    = feat.get("name", f"Feature{i}").replace(" ","_").replace("-","_")
-              offset  = feat.get("offset", "0x0")
-              ftype   = feat.get("type", "bool")
-              max_val = feat.get("max_val", feat.get("default_val", 0))
-              s       = f"feat_{i}_{name[:20]}"
+          RET = struct.pack('<I', 0xD65F03C0)   # RET (ARM64)
+          NOP = struct.pack('<I', 0xD503201F)   # NOP (ARM64)
 
-              if ftype == "bool":
-                  hook_decls.append(f"""
-          static bool hook_{s}(void*) {{ return true; }}""")
+          def patch_for(ftype, value):
+              """Return the bytes to write at the function's file offset."""
+              if ftype == "void":
+                  # No-op: just return immediately
+                  return RET
 
-              elif ftype in ("int", "long"):
-                  ct = "long long" if ftype == "long" else "int"
-                  hook_decls.append(f"""
-          static {ct} hook_{s}(void*) {{ return ({ct}){int(max_val)}; }}""")
+              elif ftype in ("int", "long", "bool"):
+                  val = int(value)
+                  if val == 0:
+                      # MOV W0, #0 is MOVZ W0, #0
+                      return movz_w0(0) + RET + NOP
+                  elif val == 1 and ftype == "bool":
+                      return movz_w0(1) + RET + NOP
+                  else:
+                      lo = val & 0xFFFF
+                      hi = (val >> 16) & 0xFFFF
+                      if hi == 0:
+                          return movz_w0(lo) + RET + NOP
+                      else:
+                          return movz_w0(lo) + movk_w0(hi, 16) + RET
 
               elif ftype == "float":
-                  hook_decls.append(f"""
-          static float hook_{s}(void*) {{ return {float(max_val)}f; }}""")
+                  # Pack IEEE-754 float as uint32, load via literal pool
+                  # Pattern: LDR W0, #8  / RET / NOP / .float value
+                  # LDR W0, #8 (PC-relative, offset=2 instructions = 8 bytes ahead):
+                  # encoding: 0x18000040 (LDR W0, [PC, #8])
+                  fval = float(value)
+                  raw  = struct.pack('<f', fval)
+                  ldr  = struct.pack('<I', 0x18000040)  # LDR W0, [PC, #8]
+                  # Now move W0 into S0 (FMOV S0, W0):
+                  fmov = struct.pack('<I', 0x1E270000)  # FMOV S0, W0
+                  return ldr + fmov + RET + raw
 
-              elif ftype == "void":
-                  hook_decls.append(f"""
-          static void hook_{s}(void*) {{ /* no-op: suppress this function */ }}""")
+              return b''   # unknown type — skip
 
-              hook_installs.append(f"""
-              shadowhook_hook_func_addr(reinterpret_cast<void*>(base + {offset}),
-                        reinterpret_cast<void*>(hook_{s}), nullptr);
-              LOGI("Hook {i}: {feat.get('name','?')} = {max_val} @ %p", (void*)(base+{offset}));""")
-
-          # Pre-compute joins — avoids any quote-inside-f-string issues on Python <3.12
-          decls_block    = "".join(hook_decls)
-          installs_block = "".join(hook_installs)
-          cases_block    = ""
-          n_features     = len(features)
-
-          cpp = f"""// Auto-generated by Taurus Shield Mod Engine
-          // Game: {game_name}  Features: {n_features}
-          #include <jni.h>
-          #include <cstdio>
-          #include <cstring>
-          #include <cstdlib>
-          #include <android/log.h>
-          #include "shadowhook.h"
-          #define TAG "ModEngine"
-          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,TAG,__VA_ARGS__)
-          #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR,TAG,__VA_ARGS__)
-
-          static uintptr_t findBase(const char* lib) {{
-              FILE* f = fopen("/proc/self/maps","r"); if(!f) return 0;
-              char line[512]; uintptr_t base=0;
-              while(fgets(line,sizeof(line),f))
-                  if(strstr(line,lib)&&strstr(line,"r-xp")){{base=(uintptr_t)strtoull(line,nullptr,16);break;}}
-              fclose(f); return base;
-          }}
-
-          {decls_block}
-
-          static void installHooks(){{
-              uintptr_t base=findBase("libil2cpp.so");
-              if(!base){{LOGE("libil2cpp.so not found");return;}}
-              LOGI("base=0x%lx",(unsigned long)base);
-          {installs_block}
-              LOGI("All {n_features} hooks installed");
-          }}
-
-          extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM*,void*){{
-              LOGI("ModEngine loading — game: {game_name}");
-              shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
-              installHooks();
-              return JNI_VERSION_1_6;
-          }}
-
-          extern "C" JNIEXPORT void JNICALL
-          Java_com_taurus_shield_ModEngineLoader_applyFeature(
-                  JNIEnv*,jclass,jint featNum,jint intVal,jlong longVal,jboolean boolVal){{
-              switch(featNum){{
-          {cases_block}
-                  default: LOGE("Unknown feature %d",(int)featNum); break;
-              }}
-          }}
-          """
-
-          os.makedirs("mod_src", exist_ok=True)
-          with open("mod_src/mod_engine.cpp","w") as f: f.write(cpp)
-          print(f"Generated mod_src/mod_engine.cpp ({len(cpp)} chars)")
-          PYEOF
-        env:
-          FEATURES_JSON: ${{ inputs.features_json }}
-          GAME_NAME: ${{ inputs.game_name }}
-
-      - name: Write CMakeLists
-        run: |
-          cat > mod_src/CMakeLists.txt <<'CMAKE'
-          cmake_minimum_required(VERSION 3.22)
-          project(mod_engine CXX)
-          set(CMAKE_CXX_STANDARD 17)
-
-          # ShadowHook — prebuilt shared lib from Maven Central
-          add_library(shadowhook SHARED IMPORTED)
-          set_target_properties(shadowhook PROPERTIES
-              IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/../shadowhook_libs/${ANDROID_ABI}/libshadowhook.so)
-
-          add_library(ModEngine SHARED mod_engine.cpp)
-          target_include_directories(ModEngine PRIVATE ${CMAKE_SOURCE_DIR}/../shadowhook_include)
-          target_link_libraries(ModEngine shadowhook android log)
-          target_compile_options(ModEngine PRIVATE -O2 -fvisibility=hidden -fstack-protector-strong)
-          CMAKE
-
-      - name: Compile arm64-v8a
-        run: |
-          ABI=arm64-v8a
-          mkdir -p mod_src/build-$ABI
-          cmake -S mod_src -B mod_src/build-$ABI \
-            -DCMAKE_TOOLCHAIN_FILE="$NDK_HOME/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI=$ABI -DANDROID_NATIVE_API_LEVEL=26 \
-            -DCMAKE_BUILD_TYPE=Release -DCMAKE_SOURCE_DIR="$(pwd)/mod_src"
-          cmake --build mod_src/build-$ABI --target ModEngine -j$(nproc)
-          ls -la mod_src/build-$ABI/libModEngine.so
-
-      - name: Compile armeabi-v7a
-        run: |
-          ABI=armeabi-v7a
-          if [ -f shadowhook_libs/$ABI/libshadowhook.so ]; then
-            mkdir -p mod_src/build-$ABI
-            cmake -S mod_src -B mod_src/build-$ABI \
-              -DCMAKE_TOOLCHAIN_FILE="$NDK_HOME/build/cmake/android.toolchain.cmake" \
-              -DANDROID_ABI=$ABI -DANDROID_NATIVE_API_LEVEL=21 \
-              -DCMAKE_BUILD_TYPE=Release -DCMAKE_SOURCE_DIR="$(pwd)/mod_src" > /dev/null 2>&1
-            cmake --build mod_src/build-$ABI --target ModEngine -j$(nproc) > /dev/null 2>&1
-            echo "armeabi-v7a done"
-          else
-            echo "armeabi-v7a libshadowhook.so not found in AAR — skipping"
-          fi
-
-      - name: Install patchelf
-        run: |
-          sudo apt-get install -y patchelf
-          patchelf --version
-
-      - name: Patch game APK
-        run: |
-          python3 - <<'PYEOF'
-          import zipfile, os, shutil, subprocess
-
-          game_name = os.environ.get("GAME_NAME","game")
+          # ── Extract APK ────────────────────────────────────────────────────────
           os.makedirs("apk_work", exist_ok=True)
-          with zipfile.ZipFile("game.apk") as z: z.extractall("apk_work")
+          with zipfile.ZipFile("game.apk") as z:
+              z.extractall("apk_work")
+          print("APK extracted.")
 
-          for abi in ["arm64-v8a","armeabi-v7a"]:
-              lib_dir = f"apk_work/lib/{abi}"
-              os.makedirs(lib_dir, exist_ok=True)
-
-              # Inject our hook .so
-              src = f"mod_src/build-{abi}/libModEngine.so"
-              if not os.path.exists(src):
-                  print(f"WARNING: {src} missing — skipping {abi}")
+          # ── Apply patches to libil2cpp.so for each ABI ─────────────────────────
+          abis = ["arm64-v8a", "armeabi-v7a"]
+          for abi in abis:
+              il2cpp = f"apk_work/lib/{abi}/libil2cpp.so"
+              if not os.path.exists(il2cpp):
+                  print(f"[{abi}] libil2cpp.so not found — skipping")
                   continue
-              shutil.copy(src, f"{lib_dir}/libModEngine.so")
-              print(f"Injected libModEngine.so → lib/{abi}/")
 
-              # Bundle ShadowHook .so — required since we link it as shared
-              shadow_src = f"shadowhook_libs/{abi}/libshadowhook.so"
-              if os.path.exists(shadow_src):
-                  shutil.copy(shadow_src, f"{lib_dir}/libshadowhook.so")
-                  print(f"Bundled  libshadowhook.so → lib/{abi}/")
+              with open(il2cpp, "r+b") as f:
+                  file_size = os.path.getsize(il2cpp)
+                  print(f"\n[{abi}] libil2cpp.so — {file_size:,} bytes")
 
-              # === KEY FIX: inject libModEngine.so as a DT_NEEDED dependency of
-              # libil2cpp.so so Android's dynamic linker loads it automatically.
-              # Without this, nothing ever calls System.loadLibrary("ModEngine")
-              # and JNI_OnLoad never runs — all hooks are dead on arrival.
-              il2cpp = f"{lib_dir}/libil2cpp.so"
-              if os.path.exists(il2cpp):
-                  # Check existing NEEDED entries to avoid duplicates
-                  result = subprocess.run(
-                      ["patchelf", "--print-needed", il2cpp],
-                      capture_output=True, text=True)
-                  existing = result.stdout.strip().splitlines()
-                  print(f"  [{abi}] libil2cpp.so existing NEEDED: {existing}")
+                  for feat in features:
+                      name        = feat.get("name", "?")
+                      offset_str  = feat.get("file_offset", feat.get("offset", "0x0"))
+                      ftype       = feat.get("type", "int")
+                      value       = feat.get("value", feat.get("max_val", 0))
 
-                  if "libModEngine.so" not in existing:
-                      subprocess.run(
-                          ["patchelf", "--add-needed", "libModEngine.so", il2cpp],
-                          check=True)
-                      print(f"  [{abi}] ✅ libModEngine.so injected as DT_NEEDED into libil2cpp.so")
-                  else:
-                      print(f"  [{abi}] libModEngine.so already in NEEDED, skipping")
+                      try:
+                          file_offset = int(offset_str, 16)
+                      except Exception:
+                          print(f"  SKIP {name}: bad offset '{offset_str}'")
+                          continue
 
-                  # Verify
-                  result2 = subprocess.run(
-                      ["patchelf", "--print-needed", il2cpp],
-                      capture_output=True, text=True)
-                  print(f"  [{abi}] libil2cpp.so NEEDED after patch: {result2.stdout.strip()}")
-              else:
-                  print(f"WARNING: libil2cpp.so not found at {il2cpp}")
+                      if file_offset >= file_size:
+                          print(f"  SKIP {name}: offset 0x{file_offset:X} >= file size")
+                          continue
 
-          # Read original compression per file — Unity streams game data directly,
-          # compressing previously-uncompressed files causes "Not enough storage" errors.
+                      patch_bytes = patch_for(ftype, value)
+                      if not patch_bytes:
+                          print(f"  SKIP {name}: unknown type '{ftype}'")
+                          continue
+
+                      # Read original bytes for logging
+                      f.seek(file_offset)
+                      orig = f.read(len(patch_bytes))
+
+                      # Write patch
+                      f.seek(file_offset)
+                      f.write(patch_bytes)
+
+                      print(f"  ✅ {name} @ 0x{file_offset:X}  "
+                            f"orig={orig.hex()}  →  patch={patch_bytes.hex()}")
+
+          # ── Re-pack APK preserving original compression per file ───────────────
           orig_compress = {}
           with zipfile.ZipFile("game.apk") as orig_z:
               for info in orig_z.infolist():
@@ -336,19 +176,23 @@ jobs:
           out = f"{game_name}_unsigned.apk"
           with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
               for root, _, files in os.walk("apk_work"):
-                  for f in files:
-                      fp  = os.path.join(root, f)
+                  for fname in files:
+                      fp  = os.path.join(root, fname)
                       arc = os.path.relpath(fp, "apk_work")
+                      # .so files must stay uncompressed for the dynamic linker
                       if arc.endswith(".so"):
-                          compress = zipfile.ZIP_STORED   # .so must be page-aligned/uncompressed
+                          compress = zipfile.ZIP_STORED
                       elif arc in orig_compress:
-                          compress = orig_compress[arc]   # preserve original (Unity data files)
+                          compress = orig_compress[arc]
                       else:
-                          compress = zipfile.ZIP_DEFLATED  # new files default
+                          compress = zipfile.ZIP_DEFLATED
                       z.write(fp, arc, compress)
-          print(f"Unsigned APK: {out} ({os.path.getsize(out)//1024//1024} MB)")
+
+          sz = os.path.getsize(out)
+          print(f"\nUnsigned APK: {out}  ({sz//1024//1024} MB)")
           PYEOF
         env:
+          FEATURES_JSON: ${{ inputs.features_json }}
           GAME_NAME: ${{ inputs.game_name }}
 
       - name: Upload modded APK to analyze-queue release
@@ -378,4 +222,4 @@ jobs:
           echo "## Mod Build Complete ✅" >> $GITHUB_STEP_SUMMARY
           echo "- **Game:** ${{ inputs.game_name }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Job ID:** ${{ inputs.job_id }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Output:** modded_${{ inputs.job_id }}.apk" >> $GITHUB_STEP_SUMMARY
+          echo "- **Method:** Direct static binary patch of libil2cpp.so" >> $GITHUB_STEP_SUMMARY
