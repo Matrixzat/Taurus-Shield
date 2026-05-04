@@ -21,17 +21,17 @@ jobs:
     steps:
       - name: Download project ZIP from release
         run: |
-          curl -fL \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          curl -L \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/octet-stream" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
             -o project.zip
           echo "Downloaded: $(ls -lh project.zip)"
           unzip -q project.zip -d project/
-          curl -fsSL -X DELETE \
-            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ github.event.inputs.asset_id }}" || true
-          echo "Asset deleted from release immediately after extraction"
+          curl -sSL -X DELETE \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" || true
+          echo "Asset deleted"
           rm -f project.zip
           echo "Contents:"
           ls project/
@@ -48,32 +48,14 @@ jobs:
         working-directory: ${{ steps.locate.outputs.flutter_root }}
         run: |
           PLATFORM=""
-
           for f in $(find . -maxdepth 2 -name "*.yml" -o -name "*.yaml" 2>/dev/null); do
-            match=$(grep -i 'flutter-target-platform' "$f" 2>/dev/null | head -1 | sed 's/.*: *//' | tr -d '[:space:]"'\''')
-            if [ -n "$match" ]; then
-              PLATFORM="$match"
-              echo "Found platform '$PLATFORM' in $f"
-              break
-            fi
+            match=$(grep -i 'flutter-target-platform' "$f" 2>/dev/null | head -1 | sed 's/.*: *//' | tr -d '[:space:]"'"'"'')
+            if [ -n "$match" ]; then PLATFORM="$match"; break; fi
           done
-
-          if [ -z "$PLATFORM" ]; then
-            for f in $(find . -maxdepth 2 -name "*.yml" -o -name "*.yaml" 2>/dev/null); do
-              match=$(grep -i 'target-platform' "$f" 2>/dev/null | grep -v '#' | head -1 | sed 's/.*: *//' | tr -d '[:space:]"'\''')
-              if [ -n "$match" ]; then
-                PLATFORM="$match"
-                echo "Found platform '$PLATFORM' in $f"
-                break
-              fi
-            done
-          fi
-
           if [ -z "$PLATFORM" ]; then
             PLATFORM="android-arm,android-arm64"
-            echo "No platform specified in project — defaulting to both: $PLATFORM"
+            echo "Defaulting to: $PLATFORM"
           fi
-
           echo "target_platform=$PLATFORM" >> "$GITHUB_OUTPUT"
           echo "Building for: $PLATFORM"
 
@@ -94,17 +76,9 @@ jobs:
         working-directory: ${{ steps.locate.outputs.flutter_root }}
         run: flutter pub get
 
-      - name: Analyze (flutter analyze)
-        working-directory: ${{ steps.locate.outputs.flutter_root }}
-        run: |
-          flutter analyze --no-fatal-infos 2>&1 | tee /tmp/analyze.log || true
-          echo '--- analyze complete ---'
-          cat /tmp/analyze.log
-
       - name: Build release APK
         working-directory: ${{ steps.locate.outputs.flutter_root }}
         run: |
-          echo "Target platform: ${{ steps.platform.outputs.target_platform }}"
           flutter build apk \
             --release \
             --target-platform ${{ steps.platform.outputs.target_platform }} \
@@ -116,6 +90,6 @@ jobs:
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: flutter-apk-${{ github.event.inputs.job_id }}
+          name: flutter-apk-${{ inputs.job_id }}
           path: ${{ steps.locate.outputs.flutter_root }}/build/app/outputs/flutter-apk/app-release.apk
-          retention-days: 1
+          retention-days: 3
