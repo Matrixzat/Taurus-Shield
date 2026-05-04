@@ -89,17 +89,15 @@ jobs:
       - name: Get Il2CppDumper version
         id: il2cpp_ver
         run: |
-          TAG=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/AndnixSH/Il2CppDumper/releases/latest \
+          TAG=$(curl -s https://api.github.com/repos/AndnixSH/Il2CppDumper/releases/latest \
             | python3 -c "import sys,json; print(json.load(sys.stdin).get('tag_name',''))" 2>/dev/null || true)
           if [ -z "$TAG" ]; then
-            TAG=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/AndnixSH/Il2CppDumper/releases?per_page=5" \
-              | python3 -c "import sys,json; r=[x for x in json.load(sys.stdin) if isinstance(x,dict) and x.get('tag_name')]; print(r[0]['tag_name'] if r else '')" 2>/dev/null || true)
+            TAG=$(curl -s "https://api.github.com/repos/AndnixSH/Il2CppDumper/releases?per_page=5" \
+              | python3 -c "import sys,json; r=[x for x in json.load(sys.stdin) if x.get('tag_name')]; print(r[0]['tag_name'] if r else '')" 2>/dev/null || true)
           fi
           if [ -z "$TAG" ]; then
-            TAG="v6.7.46"
-            echo "WARNING: API unavailable — using hardcoded fallback tag $TAG"
+            TAG="v6.1.0"
+            echo "WARNING: Using fallback tag $TAG"
           fi
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "Il2CppDumper latest: $TAG"
@@ -114,10 +112,10 @@ jobs:
       - name: Download Il2CppDumper
         if: steps.cache_dumper.outputs.cache-hit != 'true'
         run: |
-          TAG="${{ steps.il2cpp_ver.outputs.tag }}"
-          URL="https://github.com/AndnixSH/Il2CppDumper/releases/download/${TAG}/Il2CppDumper-net8-linux-x64-${TAG}.zip"
-          echo "Downloading: $URL"
-          curl -L "$URL" -o Il2CppDumper.zip
+          LATEST=$(curl -s https://api.github.com/repos/AndnixSH/Il2CppDumper/releases/latest \
+            | python3 -c "import sys,json; assets=[a['browser_download_url'] for a in json.load(sys.stdin)['assets'] if 'linux-x64' in a['name']]; print(assets[0])")
+          echo "Downloading: $LATEST"
+          curl -L "$LATEST" -o Il2CppDumper.zip
           unzip -q Il2CppDumper.zip -d Il2CppDumper
           chmod +x Il2CppDumper/Il2CppDumper 2>/dev/null || chmod +x Il2CppDumper/* 2>/dev/null || true
           echo "=== Cached files ==="
