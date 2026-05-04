@@ -1,276 +1,275 @@
 name: Game Dump (IL2CPP Analyser)
 
-  on:
-    workflow_dispatch:
-      inputs:
-        asset_id:
-          description: 'Release asset ID of the game APK (from analyze-queue release)'
-          required: true
-        job_id:
-          description: 'Tracking ID — used to name the output asset'
-          required: true
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'Release asset ID of the game APK (from analyze-queue release)'
+        required: true
+      job_id:
+        description: 'Tracking ID — used to name the output asset'
+        required: true
 
-  jobs:
-    dump:
-      runs-on: ubuntu-latest
-      timeout-minutes: 30
-      permissions:
-        contents: write
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
 
-      steps:
-        - name: Get analyze-queue release ID
-          id: release
-          run: |
-            RELEASE=$(curl -s \
+    steps:
+      - name: Get analyze-queue release ID
+        id: release
+        run: |
+          RELEASE=$(curl -s \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/tags/analyze-queue")
+          RELEASE_ID=$(echo "$RELEASE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
+          echo "Using release ID: $RELEASE_ID"
+
+      - name: Download input file
+        run: |
+          curl -L \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
+            -o input.bin
+          echo "Downloaded: $(du -sh input.bin)"
+
+      - name: Extract IL2CPP files
+        run: |
+          python3 - <<'EOF'
+          import zipfile, os, sys
+
+          os.makedirs("il2cpp", exist_ok=True)
+
+          with zipfile.ZipFile("input.bin") as z:
+              names = z.namelist()
+              print(f"Entries in upload: {len(names)}")
+              for n in names[:10]:
+                  print(f"  {n}")
+
+              # ── Detect slim zip (app pre-extracted libil2cpp.so + metadata at root) ──
+              slim_so   = "libil2cpp.so"        if "libil2cpp.so"        in names else None
+              slim_meta = "global-metadata.dat" if "global-metadata.dat" in names else None
+
+              if slim_so and slim_meta:
+                  print("Format: SLIM ZIP (pre-extracted by Taurus Shield app)")
+                  for src, dst in [(slim_so, "il2cpp/libil2cpp.so"),
+                                   (slim_meta, "il2cpp/global-metadata.dat")]:
+                      data = z.read(src)
+                      with open(dst, "wb") as f: f.write(data)
+                      print(f"  {src} -> {dst}  ({len(data)//1024} KB)")
+              else:
+                  print("Format: FULL APK — scanning for IL2CPP files…")
+                  il2cpp_candidates = [n for n in names if "libil2cpp.so" in n]
+                  il2cpp_candidates.sort(key=lambda x: (0 if "arm64" in x else 1))
+                  meta_candidates   = [n for n in names if "global-metadata.dat" in n]
+
+                  if not il2cpp_candidates:
+                      print("ERROR: libil2cpp.so not found — not a Unity IL2CPP game")
+                      sys.exit(1)
+                  if not meta_candidates:
+                      print("ERROR: global-metadata.dat not found — IL2CPP metadata missing")
+                      sys.exit(1)
+
+                  for src, dst in [(il2cpp_candidates[0], "il2cpp/libil2cpp.so"),
+                                   (meta_candidates[0],   "il2cpp/global-metadata.dat")]:
+                      data = z.read(src)
+                      with open(dst, "wb") as f: f.write(data)
+                      print(f"  {src} -> {dst}  ({len(data)//1024} KB)")
+
+          print("Extraction complete")
+          for f in os.listdir("il2cpp"):
+              sz = os.path.getsize(f"il2cpp/{f}")
+              print(f"  il2cpp/{f}  {sz//1024} KB")
+          EOF
+
+      - name: Install .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      # ── Il2CppDumper cache ────────────────────────────────────────────────
+      # Check the latest release tag ONCE and use it as the cache key.
+      # Cache hit  → skip the 28 MB download entirely (saves ~15 s per run).
+      # Cache miss → download, extract, chmod, then cache for next run.
+      # The cache is invalidated automatically when a new release is tagged.
+      - name: Get Il2CppDumper version
+        id: il2cpp_ver
+        run: |
+          TAG=$(curl -s https://api.github.com/repos/AndnixSH/Il2CppDumper/releases/latest \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Il2CppDumper latest: $TAG"
+
+      - name: Restore Il2CppDumper cache
+        id: cache_dumper
+        uses: actions/cache@v4
+        with:
+          path: Il2CppDumper
+          key: il2cppdumper-linux-x64-${{ steps.il2cpp_ver.outputs.tag }}
+
+      - name: Download Il2CppDumper
+        if: steps.cache_dumper.outputs.cache-hit != 'true'
+        run: |
+          LATEST=$(curl -s https://api.github.com/repos/AndnixSH/Il2CppDumper/releases/latest \
+            | python3 -c "import sys,json; assets=[a['browser_download_url'] for a in json.load(sys.stdin)['assets'] if 'linux-x64' in a['name']]; print(assets[0])")
+          echo "Downloading: $LATEST"
+          curl -L "$LATEST" -o Il2CppDumper.zip
+          unzip -q Il2CppDumper.zip -d Il2CppDumper
+          chmod +x Il2CppDumper/Il2CppDumper 2>/dev/null || chmod +x Il2CppDumper/* 2>/dev/null || true
+          echo "=== Cached files ==="
+          ls -la Il2CppDumper/
+
+      - name: Ensure Il2CppDumper is executable
+        run: |
+          chmod +x Il2CppDumper/Il2CppDumper 2>/dev/null || chmod +x Il2CppDumper/* 2>/dev/null || true
+          echo "=== Il2CppDumper files ==="
+          ls -la Il2CppDumper/
+
+      - name: Run Il2CppDumper
+        run: |
+          mkdir -p dump_out
+          EXE=$(find Il2CppDumper -maxdepth 1 -type f -name "Il2CppDumper" | head -1)
+          if [ -z "$EXE" ]; then
+            EXE=$(find Il2CppDumper -maxdepth 1 -type f ! -name "*.dll" ! -name "*.so" ! -name "*.json" | head -1)
+          fi
+          echo "Running: $EXE"
+          "$EXE" il2cpp/libil2cpp.so il2cpp/global-metadata.dat dump_out/ 2>&1 | tee dumper_output.txt || true
+          echo "=== dump_out contents ==="
+          ls -la dump_out/ 2>/dev/null || echo "(empty)"
+
+      - name: Parse dump → offsets.json
+        run: |
+          python3 - <<'EOF'
+          import re, json, os, sys
+
+          if os.path.exists("dumper_output.txt"):
+              with open("dumper_output.txt") as f:
+                  out = f.read().strip()
+              print("=== Il2CppDumper output ===")
+              print(out[-3000:] if len(out) > 3000 else out)
+              print("===========================")
+
+          dump_file = "dump_out/dump.cs"
+          if not os.path.exists(dump_file):
+              sj = "dump_out/script.json"
+              if os.path.exists(sj):
+                  with open(sj) as f: data = json.load(f)
+                  print(f"Using script.json: {len(data)} entries")
+                  with open("offsets.json", "w") as f: json.dump(data, f, indent=2)
+                  sys.exit(0)
+
+              out_files = os.listdir("dump_out") if os.path.isdir("dump_out") else []
+              print(f"dump_out contains: {out_files}")
+              dumper_log = open("dumper_output.txt").read() if os.path.exists("dumper_output.txt") else "no log"
+              error_json = {
+                  "error": "Il2CppDumper produced no output",
+                  "dump_out_files": out_files,
+                  "dumper_log": dumper_log[-2000:],
+                  "total_methods": 0, "interesting_methods": [], "all_methods": []
+              }
+              with open("offsets.json", "w") as f: json.dump(error_json, f, indent=2)
+              print("Wrote error offsets.json — workflow will continue and upload diagnostic JSON")
+              sys.exit(0)
+
+          methods = []
+          current_class = ""
+          pending = None
+
+          with open(dump_file, encoding="utf-8", errors="replace") as f:
+              for line in f:
+                  cm = re.match(
+                      r'^\s*(?:public |private |protected |internal |sealed |abstract )*'
+                      r'(?:class|struct|interface)\s+(\w+)', line)
+                  if cm:
+                      current_class = cm.group(1)
+
+                  mm = re.search(
+                      r'//\s*RVA:\s*(0x[0-9A-Fa-f]+)\s+Offset:\s*(0x[0-9A-Fa-f]+)', line)
+                  if mm:
+                      pending = {"rva": mm.group(1), "offset": mm.group(2), "class": current_class}
+                      continue
+
+                  if pending is not None:
+                      sig = re.search(
+                          r'(\w[\w\s\*<>\[\],.]+)\s+(\w+)\s*\(([^)]*)\)', line)
+                      if sig and not line.strip().startswith("//"):
+                          pending.update({
+                              "method": sig.group(2).strip(),
+                              "return_type": sig.group(1).strip(),
+                              "params": sig.group(3).strip(),
+                              "signature": line.strip()
+                          })
+                          methods.append(pending)
+                      pending = None
+
+          keywords = {
+              "coin":9,"gold":9,"gem":9,"diamond":9,"money":8,"cash":8,
+              "unlock":8,"premium":8,"vip":7,"affor":9,
+              "enough":7,"cost":6,"speed":7,"damage":6,"health":6,"hp":6,
+              "score":7,"point":6,"reward":7,"chest":7,"pickup":6,
+              "cooldown":7,"infinite":10,"unlimited":10,"invincib":10,"revive":8,
+              "cheat":10,"hack":10,"spawn":6,"max":5,
+              "save":4,"load":4,"add":2,"set":2,"get":1
+          }
+          for m in methods:
+              text = (m.get("method","") + " " + m.get("class","")).lower()
+              m["interest_score"] = sum(pts for kw, pts in keywords.items() if kw in text)
+
+          methods.sort(key=lambda x: -x["interest_score"])
+          top = [m for m in methods if m["interest_score"] > 0][:500]
+
+          game_classes = [m for m in methods if any(
+              k in m.get("class","").lower()
+              for k in ["game","runner","player","character","coin","score","enemy","level","spawn"]
+          )]
+
+          result = {
+              "total_methods": len(methods),
+              "interesting_methods": top,
+              "game_class_methods": game_classes[:300],
+              "all_methods": methods[:3000]
+          }
+          with open("offsets.json","w") as f: json.dump(result, f, indent=2)
+          print(f"offsets.json: {len(top)} interesting / {len(methods)} total methods")
+          EOF
+
+      - name: Upload offsets.json to analyze-queue release
+        run: |
+          RELEASE_ID="${{ steps.release.outputs.release_id }}"
+          ASSET_NAME="dump_offsets_${{ inputs.job_id }}.json"
+
+          curl -s -L \
+            -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=$ASSET_NAME" \
+            --data-binary @offsets.json \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print('Uploaded — asset_id:', d.get('id','error'))"
+
+          if [ -f dump_out/dump.cs ]; then
+            curl -s -L -X POST \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/vnd.github+json" \
-              "https://api.github.com/repos/${{ github.repository }}/releases/tags/analyze-queue")
-            RELEASE_ID=$(echo "$RELEASE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
-            echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
-            echo "Using release ID: $RELEASE_ID"
+              -H "Content-Type: text/plain" \
+              "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=dump_cs_${{ inputs.job_id }}.txt" \
+              --data-binary @dump_out/dump.cs | python3 -c "import sys,json; d=json.load(sys.stdin); print('dump.cs asset_id:', d.get('id','?'))"
+          fi
 
-        - name: Download input file
-          run: |
-            curl -L \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/octet-stream" \
-              "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
-              -o input.bin
-            echo "Downloaded: $(du -sh input.bin)"
+      - name: Delete input asset
+        run: |
+          curl -s -L -X DELETE \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}"
+          echo "Input asset deleted"
 
-        - name: Extract IL2CPP files
-          run: |
-            python3 - <<'EOF'
-            import zipfile, os, sys
-
-            os.makedirs("il2cpp", exist_ok=True)
-
-            with zipfile.ZipFile("input.bin") as z:
-                names = z.namelist()
-                print(f"Entries in upload: {len(names)}")
-                for n in names[:10]:
-                    print(f"  {n}")
-
-                # ── Detect slim zip (app pre-extracted libil2cpp.so + metadata at root) ──
-                slim_so   = "libil2cpp.so"        if "libil2cpp.so"        in names else None
-                slim_meta = "global-metadata.dat" if "global-metadata.dat" in names else None
-
-                if slim_so and slim_meta:
-                    print("Format: SLIM ZIP (pre-extracted by Taurus Shield app)")
-                    for src, dst in [(slim_so, "il2cpp/libil2cpp.so"),
-                                     (slim_meta, "il2cpp/global-metadata.dat")]:
-                        data = z.read(src)
-                        with open(dst, "wb") as f: f.write(data)
-                        print(f"  {src} -> {dst}  ({len(data)//1024} KB)")
-                else:
-                    print("Format: FULL APK — scanning for IL2CPP files…")
-                    il2cpp_candidates = [n for n in names if "libil2cpp.so" in n]
-                    il2cpp_candidates.sort(key=lambda x: (0 if "arm64" in x else 1))
-                    meta_candidates   = [n for n in names if "global-metadata.dat" in n]
-
-                    if not il2cpp_candidates:
-                        print("ERROR: libil2cpp.so not found — not a Unity IL2CPP game")
-                        sys.exit(1)
-                    if not meta_candidates:
-                        print("ERROR: global-metadata.dat not found — IL2CPP metadata missing")
-                        sys.exit(1)
-
-                    for src, dst in [(il2cpp_candidates[0], "il2cpp/libil2cpp.so"),
-                                     (meta_candidates[0],   "il2cpp/global-metadata.dat")]:
-                        data = z.read(src)
-                        with open(dst, "wb") as f: f.write(data)
-                        print(f"  {src} -> {dst}  ({len(data)//1024} KB)")
-
-            print("Extraction complete")
-            for f in os.listdir("il2cpp"):
-                sz = os.path.getsize(f"il2cpp/{f}")
-                print(f"  il2cpp/{f}  {sz//1024} KB")
-            EOF
-
-        - name: Install .NET
-          uses: actions/setup-dotnet@v4
-          with:
-            dotnet-version: '8.0.x'
-
-        # ── Il2CppDumper cache ────────────────────────────────────────────────
-        # Check the latest release tag ONCE and use it as the cache key.
-        # Cache hit  → skip the 28 MB download entirely (saves ~15 s per run).
-        # Cache miss → download, extract, chmod, then cache for next run.
-        # The cache is invalidated automatically when a new release is tagged.
-        - name: Get Il2CppDumper version
-          id: il2cpp_ver
-          run: |
-            TAG=$(curl -s https://api.github.com/repos/AndnixSH/Il2CppDumper/releases/latest \
-              | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
-            echo "tag=$TAG" >> $GITHUB_OUTPUT
-            echo "Il2CppDumper latest: $TAG"
-
-        - name: Restore Il2CppDumper cache
-          id: cache_dumper
-          uses: actions/cache@v4
-          with:
-            path: Il2CppDumper
-            key: il2cppdumper-linux-x64-${{ steps.il2cpp_ver.outputs.tag }}
-
-        - name: Download Il2CppDumper
-          if: steps.cache_dumper.outputs.cache-hit != 'true'
-          run: |
-            LATEST=$(curl -s https://api.github.com/repos/AndnixSH/Il2CppDumper/releases/latest \
-              | python3 -c "import sys,json; assets=[a['browser_download_url'] for a in json.load(sys.stdin)['assets'] if 'linux-x64' in a['name']]; print(assets[0])")
-            echo "Downloading: $LATEST"
-            curl -L "$LATEST" -o Il2CppDumper.zip
-            unzip -q Il2CppDumper.zip -d Il2CppDumper
-            chmod +x Il2CppDumper/Il2CppDumper 2>/dev/null || chmod +x Il2CppDumper/* 2>/dev/null || true
-            echo "=== Cached files ==="
-            ls -la Il2CppDumper/
-
-        - name: Ensure Il2CppDumper is executable
-          run: |
-            chmod +x Il2CppDumper/Il2CppDumper 2>/dev/null || chmod +x Il2CppDumper/* 2>/dev/null || true
-            echo "=== Il2CppDumper files ==="
-            ls -la Il2CppDumper/
-
-        - name: Run Il2CppDumper
-          run: |
-            mkdir -p dump_out
-            EXE=$(find Il2CppDumper -maxdepth 1 -type f -name "Il2CppDumper" | head -1)
-            if [ -z "$EXE" ]; then
-              EXE=$(find Il2CppDumper -maxdepth 1 -type f ! -name "*.dll" ! -name "*.so" ! -name "*.json" | head -1)
-            fi
-            echo "Running: $EXE"
-            "$EXE" il2cpp/libil2cpp.so il2cpp/global-metadata.dat dump_out/ 2>&1 | tee dumper_output.txt || true
-            echo "=== dump_out contents ==="
-            ls -la dump_out/ 2>/dev/null || echo "(empty)"
-
-        - name: Parse dump → offsets.json
-          run: |
-            python3 - <<'EOF'
-            import re, json, os, sys
-
-            if os.path.exists("dumper_output.txt"):
-                with open("dumper_output.txt") as f:
-                    out = f.read().strip()
-                print("=== Il2CppDumper output ===")
-                print(out[-3000:] if len(out) > 3000 else out)
-                print("===========================")
-
-            dump_file = "dump_out/dump.cs"
-            if not os.path.exists(dump_file):
-                sj = "dump_out/script.json"
-                if os.path.exists(sj):
-                    with open(sj) as f: data = json.load(f)
-                    print(f"Using script.json: {len(data)} entries")
-                    with open("offsets.json", "w") as f: json.dump(data, f, indent=2)
-                    sys.exit(0)
-
-                out_files = os.listdir("dump_out") if os.path.isdir("dump_out") else []
-                print(f"dump_out contains: {out_files}")
-                dumper_log = open("dumper_output.txt").read() if os.path.exists("dumper_output.txt") else "no log"
-                error_json = {
-                    "error": "Il2CppDumper produced no output",
-                    "dump_out_files": out_files,
-                    "dumper_log": dumper_log[-2000:],
-                    "total_methods": 0, "interesting_methods": [], "all_methods": []
-                }
-                with open("offsets.json", "w") as f: json.dump(error_json, f, indent=2)
-                print("Wrote error offsets.json — workflow will continue and upload diagnostic JSON")
-                sys.exit(0)
-
-            methods = []
-            current_class = ""
-            pending = None
-
-            with open(dump_file, encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    cm = re.match(
-                        r'^\s*(?:public |private |protected |internal |sealed |abstract )*'
-                        r'(?:class|struct|interface)\s+(\w+)', line)
-                    if cm:
-                        current_class = cm.group(1)
-
-                    mm = re.search(
-                        r'//\s*RVA:\s*(0x[0-9A-Fa-f]+)\s+Offset:\s*(0x[0-9A-Fa-f]+)', line)
-                    if mm:
-                        pending = {"rva": mm.group(1), "offset": mm.group(2), "class": current_class}
-                        continue
-
-                    if pending is not None:
-                        sig = re.search(
-                            r'(\w[\w\s\*<>\[\],.]+)\s+(\w+)\s*\(([^)]*)\)', line)
-                        if sig and not line.strip().startswith("//"):
-                            pending.update({
-                                "method": sig.group(2).strip(),
-                                "return_type": sig.group(1).strip(),
-                                "params": sig.group(3).strip(),
-                                "signature": line.strip()
-                            })
-                            methods.append(pending)
-                        pending = None
-
-            keywords = {
-                "coin":9,"gold":9,"gem":9,"diamond":9,"money":8,"cash":8,
-                "unlock":8,"premium":8,"vip":7,"affor":9,
-                "enough":7,"cost":6,"speed":7,"damage":6,"health":6,"hp":6,
-                "score":7,"point":6,"reward":7,"chest":7,"pickup":6,
-                "cooldown":7,"infinite":10,"unlimited":10,"invincib":10,"revive":8,
-                "cheat":10,"hack":10,"spawn":6,"max":5,
-                "save":4,"load":4,"add":2,"set":2,"get":1
-            }
-            for m in methods:
-                text = (m.get("method","") + " " + m.get("class","")).lower()
-                m["interest_score"] = sum(pts for kw, pts in keywords.items() if kw in text)
-
-            methods.sort(key=lambda x: -x["interest_score"])
-            top = [m for m in methods if m["interest_score"] > 0][:500]
-
-            game_classes = [m for m in methods if any(
-                k in m.get("class","").lower()
-                for k in ["game","runner","player","character","coin","score","enemy","level","spawn"]
-            )]
-
-            result = {
-                "total_methods": len(methods),
-                "interesting_methods": top,
-                "game_class_methods": game_classes[:300],
-                "all_methods": methods[:3000]
-            }
-            with open("offsets.json","w") as f: json.dump(result, f, indent=2)
-            print(f"offsets.json: {len(top)} interesting / {len(methods)} total methods")
-            EOF
-
-        - name: Upload offsets.json to analyze-queue release
-          run: |
-            RELEASE_ID="${{ steps.release.outputs.release_id }}"
-            ASSET_NAME="dump_offsets_${{ inputs.job_id }}.json"
-
-            curl -s -L \
-              -X POST \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Content-Type: application/json" \
-              "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=$ASSET_NAME" \
-              --data-binary @offsets.json \
-              | python3 -c "import sys,json; d=json.load(sys.stdin); print('Uploaded — asset_id:', d.get('id','error'))"
-
-            if [ -f dump_out/dump.cs ]; then
-              curl -s -L -X POST \
-                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-                -H "Content-Type: text/plain" \
-                "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=dump_cs_${{ inputs.job_id }}.txt" \
-                --data-binary @dump_out/dump.cs | python3 -c "import sys,json; d=json.load(sys.stdin); print('dump.cs asset_id:', d.get('id','?'))"
-            fi
-
-        - name: Delete input asset
-          run: |
-            curl -s -L -X DELETE \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}"
-            echo "Input asset deleted"
-
-        - name: Summary
-          run: |
-            echo "## Game Dump Complete ✅" >> $GITHUB_STEP_SUMMARY
-            echo "- **Job ID:** ${{ inputs.job_id }}" >> $GITHUB_STEP_SUMMARY
-            echo "- **Il2CppDumper:** ${{ steps.il2cpp_ver.outputs.tag }} (cache hit: ${{ steps.cache_dumper.outputs.cache-hit }})" >> $GITHUB_STEP_SUMMARY
-            echo "- **Output:** dump_offsets_${{ inputs.job_id }}.json" >> $GITHUB_STEP_SUMMARY
-            [ -f offsets.json ] && echo "- **offsets.json:** $(du -sh offsets.json | cut -f1)" >> $GITHUB_STEP_SUMMARY || true
-  
+      - name: Summary
+        run: |
+          echo "## Game Dump Complete ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- **Job ID:** ${{ inputs.job_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Il2CppDumper:** ${{ steps.il2cpp_ver.outputs.tag }} (cache hit: ${{ steps.cache_dumper.outputs.cache-hit }})" >> $GITHUB_STEP_SUMMARY
+          echo "- **Output:** dump_offsets_${{ inputs.job_id }}.json" >> $GITHUB_STEP_SUMMARY
+          [ -f offsets.json ] && echo "- **offsets.json:** $(du -sh offsets.json | cut -f1)" >> $GITHUB_STEP_SUMMARY || true
