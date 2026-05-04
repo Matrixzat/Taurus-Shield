@@ -31,13 +31,14 @@ jobs:
           echo "Downloaded: $(du -sh input.zip)"
 
       - name: Run Cocos2d-x full analyser
-        env:
-          PYTHONPATH: ${{ github.workspace }}/android/app/src/main/python
         run: |
           python3 - <<'PYEOF'
           import sys, json, os, zipfile
 
-          # ── Import the real engine ────────────────────────────────────────────
+          # ── Wire in the real engine (absolute path, works with stdin mode) ────
+          _engine_dir = os.path.join(os.getcwd(), "android", "app", "src", "main", "python")
+          if _engine_dir not in sys.path:
+              sys.path.insert(0, _engine_dir)
           import cocos_analyzer as ca
 
           # Override _log so every log line prints to the Actions console
