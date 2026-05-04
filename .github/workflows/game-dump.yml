@@ -7,7 +7,7 @@ on:
         description: 'Release asset ID of the game APK (from analyze-queue release)'
         required: true
       job_id:
-        description: 'Tracking ID — used to name the output asset'
+        description: 'Tracking ID — used to name the output artifact'
         required: true
 
 jobs:
@@ -18,17 +18,6 @@ jobs:
       contents: write
 
     steps:
-      - name: Get analyze-queue release ID
-        id: release
-        run: |
-          RELEASE=$(curl -s \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/releases/tags/analyze-queue")
-          RELEASE_ID=$(echo "$RELEASE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
-          echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
-          echo "Using release ID: $RELEASE_ID"
-
       - name: Download input file
         run: |
           curl -L \
@@ -349,40 +338,18 @@ jobs:
           print(f"offsets.json: {len(top)} interesting / {len(methods)} total methods")
           EOF
 
-      - name: Upload offsets.json to analyze-queue release
+      - name: Prepare artifact directory
         run: |
-          RELEASE_ID="${{ steps.release.outputs.release_id }}"
-          ASSET_NAME="dump_offsets_${{ inputs.job_id }}.json"
+          cp offsets.json dump_out/offsets.json
+          echo "=== Artifact contents ==="
+          ls -la dump_out/
 
-          curl -s -L \
-            -X POST \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=$ASSET_NAME" \
-            --data-binary @offsets.json \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print('Uploaded — asset_id:', d.get('id','error'))"
-
-          upload_file() {
-            local src="$1" name="$2" ct="$3"
-            if [ -f "$src" ]; then
-              curl -s -L -X POST \
-                -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-                -H "Content-Type: $ct" \
-                "https://uploads.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets?name=$name" \
-                --data-binary @"$src" | python3 -c "import sys,json; d=json.load(sys.stdin); print('$name asset_id:', d.get('id','?'), '— size:', d.get('size','?'), 'bytes')"
-            else
-              echo "$src not found — skipping"
-            fi
-          }
-
-          JID="${{ inputs.job_id }}"
-          upload_file dump_out/dump.cs            "dump_cs_${JID}.txt"               "text/plain"
-          upload_file dump_out/il2cpp.h           "dump_il2cpp_h_${JID}.txt"         "text/plain"
-          upload_file dump_out/script.json        "dump_script_${JID}.json"          "application/json"
-          upload_file dump_out/stringliteral.json "dump_stringliteral_${JID}.json"   "application/json"
-          upload_file dump_out/ida.py             "dump_ida_${JID}.py"               "text/plain"
-          upload_file dump_out/ida_with_struct.py "dump_ida_struct_${JID}.py"        "text/plain"
-          upload_file dump_out/ghidra.py          "dump_ghidra_${JID}.py"            "text/plain"
+      - name: Upload results artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: game-dump-${{ inputs.job_id }}
+          path: dump_out/
+          retention-days: 7
       - name: Delete input asset
         run: |
           curl -s -L -X DELETE \
@@ -395,7 +362,6 @@ jobs:
           echo "## Game Dump Complete ✅" >> $GITHUB_STEP_SUMMARY
           echo "- **Job ID:** ${{ inputs.job_id }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Il2CppDumper:** ${{ steps.il2cpp_ver.outputs.tag }} (cache hit: ${{ steps.cache_dumper.outputs.cache-hit }})" >> $GITHUB_STEP_SUMMARY
-          echo "- **Offsets JSON:** dump_offsets_${{ inputs.job_id }}.json" >> $GITHUB_STEP_SUMMARY
-          echo "- **Extra dumps (if produced):** dump_cs · il2cpp_h · script_json · stringliteral · ida · ida_struct · ghidra" >> $GITHUB_STEP_SUMMARY
+          echo "- **Artifact:** game-dump-${{ inputs.job_id }} (7-day retention)" >> $GITHUB_STEP_SUMMARY
           [ -f offsets.json ] && echo "- **offsets.json size:** $(du -sh offsets.json | cut -f1)" >> $GITHUB_STEP_SUMMARY || true
           echo "- **dump_out files:** $(ls dump_out/ 2>/dev/null | tr '\n' ' ' || echo empty)" >> $GITHUB_STEP_SUMMARY
