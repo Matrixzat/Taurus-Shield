@@ -20,596 +20,445 @@ jobs:
     steps:
       - name: Download input file
         run: |
-          curl -fL \
+          curl -L \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
             -o input.zip
           echo "Downloaded: $(du -sh input.zip)"
 
-      - name: Analyse Cocos2d-x game
+      - name: Extract slim ZIP
         run: |
-          python3 << 'PYEOF'
-import sys, json, os, zipfile, struct, re
-from collections import OrderedDict
+          python3 - <<'EOF'
+          import zipfile, os, sys, json
 
-os.makedirs("output",     exist_ok=True)
-os.makedirs("game_files", exist_ok=True)
+          os.makedirs("output",     exist_ok=True)
+          os.makedirs("game_files", exist_ok=True)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# KEYWORDS
-# ══════════════════════════════════════════════════════════════════════════════
-_KEYWORDS = {
-    "coin":9,"gold":9,"gem":9,"diamond":9,"cash":8,"money":8,
-    "health":8,"hp":8,"life":8,"lives":7,"heart":7,"energy":7,
-    "unlock":8,"premium":8,"vip":7,"purchase":8,"buy":7,
-    "speed":7,"damage":6,"score":7,"point":6,"reward":7,
-    "maxhp":9,"maxhealth":9,"maxlevel":8,"maxstage":8,
-    "infinite":10,"unlimited":10,"invincib":10,"godmode":10,
-    "revive":8,"respawn":7,"cheat":10,"hack":10,
-    "mana":7,"shield":7,"armor":7,"stamina":7,"skill":6,
-    "cooldown":7,"timer":6,"time":4,"level":5,"stage":5,
-    "add":2,"get":1,"set":2,"is":1,"has":2,"can":2,
-    "ammo":8,"bullet":7,"weapon":7,"gun":7,"bomb":7,
-    "player":5,"enemy":6,"boss":7,"kill":6,"dead":6,"alive":7,
-    "soldier":6,"jetpack":8,"fuel":8,"nitro":8,"boost":7,
-}
+          meta = {}
+          with zipfile.ZipFile("input.zip") as z:
+              names = z.namelist()
+              print(f"ZIP entries ({len(names)}): {names}")
+              if "_meta.json" in names:
+                  meta = json.loads(z.read("_meta.json"))
+                  print(f"Meta: {meta}")
+              for n in names:
+                  if n == "_meta.json" or n.endswith("/"):
+                      continue
+                  data = z.read(n)
+                  dest = os.path.join("game_files", n)
+                  parent = os.path.dirname(dest)
+                  if parent:
+                      os.makedirs(parent, exist_ok=True)
+                  with open(dest, "wb") as f:
+                      f.write(data)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ELF PARSER
-# ══════════════════════════════════════════════════════════════════════════════
-def _elf_parse(data):
-    if len(data) < 64 or data[:4] != b"\x7fELF":
-        return None
-    endian = "<" if data[5] == 1 else ">"
-    is64   = (data[4] == 2)
-    try:
-        if is64:
-            e_phoff     = struct.unpack_from(f"{endian}Q", data, 32)[0]
-            e_shoff     = struct.unpack_from(f"{endian}Q", data, 40)[0]
-            e_phentsize = struct.unpack_from(f"{endian}H", data, 54)[0]
-            e_phnum     = struct.unpack_from(f"{endian}H", data, 56)[0]
-            e_shentsize = struct.unpack_from(f"{endian}H", data, 58)[0]
-            e_shnum     = struct.unpack_from(f"{endian}H", data, 60)[0]
-            e_shstrndx  = struct.unpack_from(f"{endian}H", data, 62)[0]
-        else:
-            e_phoff     = struct.unpack_from(f"{endian}I", data, 28)[0]
-            e_shoff     = struct.unpack_from(f"{endian}I", data, 32)[0]
-            e_phentsize = struct.unpack_from(f"{endian}H", data, 42)[0]
-            e_phnum     = struct.unpack_from(f"{endian}H", data, 44)[0]
-            e_shentsize = struct.unpack_from(f"{endian}H", data, 46)[0]
-            e_shnum     = struct.unpack_from(f"{endian}H", data, 48)[0]
-            e_shstrndx  = struct.unpack_from(f"{endian}H", data, 50)[0]
-    except struct.error:
-        return None
+          with open("game_files/_meta.json", "w") as f:
+              json.dump(meta, f)
 
-    segments = []
-    if e_phoff and e_phentsize:
-        for i in range(min(e_phnum, 96)):
-            off = e_phoff + i * e_phentsize
-            if off + e_phentsize > len(data):
-                break
-            try:
-                if is64:
-                    p_type, p_flags = struct.unpack_from(f"{endian}II", data, off)
-                    p_offset, p_vaddr, _, p_filesz, p_memsz, _ = \
-                        struct.unpack_from(f"{endian}QQQQQQ", data, off + 8)
-                else:
-                    p_type, p_offset, p_vaddr, _, p_filesz, p_memsz, p_flags, _ = \
-                        struct.unpack_from(f"{endian}IIIIIIII", data, off)
-                segments.append({"type": p_type, "flags": p_flags,
-                                  "offset": p_offset, "vaddr": p_vaddr,
-                                  "filesz": p_filesz, "memsz": p_memsz})
-            except struct.error:
-                break
+          so_path = "game_files/libcocos2dcpp.so"
+          if not os.path.exists(so_path):
+              print("ERROR: libcocos2dcpp.so not found in ZIP")
+              sys.exit(1)
 
-    sections  = []
-    shstrtab  = b""
-    if e_shoff and e_shentsize and e_shnum and e_shstrndx < e_shnum:
-        sstr_raw_off = e_shoff + e_shstrndx * e_shentsize
-        try:
-            if is64:
-                _, _, _, _, sstr_off, sstr_sz, _, _, _, _ = \
-                    struct.unpack_from(f"{endian}IIQQQQIIQQ", data, sstr_raw_off)
-            else:
-                _, _, _, _, sstr_off, sstr_sz, _, _, _, _ = \
-                    struct.unpack_from(f"{endian}IIIIIIIIII", data, sstr_raw_off)
-            shstrtab = data[sstr_off:sstr_off + sstr_sz]
-        except Exception:
-            pass
-        for i in range(min(e_shnum, 512)):
-            off = e_shoff + i * e_shentsize
-            if off + e_shentsize > len(data):
-                break
-            try:
-                if is64:
-                    ni, sh_type, sh_flags, sh_addr, sh_off, sh_sz, sh_link, _, _, _ = \
-                        struct.unpack_from(f"{endian}IIQQQQIIQQ", data, off)
-                else:
-                    ni, sh_type, sh_flags, sh_addr, sh_off, sh_sz, sh_link, _, _, _ = \
-                        struct.unpack_from(f"{endian}IIIIIIIIII", data, off)
-                end  = shstrtab.find(b"\x00", ni)
-                name = shstrtab[ni:end].decode("utf-8", errors="replace") if end >= ni else ""
-                sections.append({"name": name, "type": sh_type, "flags": sh_flags,
-                                  "addr": sh_addr, "offset": sh_off,
-                                  "size": sh_sz,   "link": sh_link})
-            except struct.error:
-                break
+          sz = os.path.getsize(so_path)
+          print(f"libcocos2dcpp.so: {sz // 1048576} MB")
 
-    return {"endian": endian, "is64": is64, "sections": sections, "segments": segments}
+          hint = meta.get("game_type_hint", "native")
+          game_type = hint if hint in ("lua", "js", "native") else "native"
+          print(f"Game type: {game_type.upper()}")
+          with open("game_files/_type.txt", "w") as f:
+              f.write(game_type)
+          print("Extraction complete")
+          EOF
 
+      - name: Parse ELF symbols + string scan
+        run: |
+          python3 - <<'EOF'
+          import os, sys, json, struct
 
-def _elf_vma_to_off(vma, segments):
-    for seg in segments:
-        if seg["type"] == 1 and seg["vaddr"] <= vma < seg["vaddr"] + seg["filesz"]:
-            return vma - seg["vaddr"] + seg["offset"]
-    return vma
+          game_type = open("game_files/_type.txt").read().strip()
+          if game_type != "native":
+              print(f"Game type is {game_type} — skipping ELF step")
+              with open("output/symbols.json", "w") as f:
+                  json.dump([], f)
+              sys.exit(0)
 
+          print("Reading libcocos2dcpp.so …")
+          with open("game_files/libcocos2dcpp.so", "rb") as f:
+              data = f.read()
+          print(f"Size: {len(data) // 1048576} MB")
 
-def _elf_read_symtab(data, endian, is64, sections, sh_type):
-    sym_sec = next((s for s in sections if s["type"] == sh_type), None)
-    if sym_sec is None or sym_sec["size"] == 0:
-        return []
-    lnk = sym_sec["link"]
-    if lnk <= 0 or lnk >= len(sections):
-        return []
-    str_sec  = sections[lnk]
-    str_data = data[str_sec["offset"]: str_sec["offset"] + str_sec["size"]]
-    sym_data = data[sym_sec["offset"]: sym_sec["offset"] + sym_sec["size"]]
-    entsize  = 24 if is64 else 16
-    out = []
-    for i in range(len(sym_data) // entsize):
-        off = i * entsize
-        if off + entsize > len(sym_data):
-            break
-        try:
-            if is64:
-                st_name, st_info, _, _, st_value, st_size = \
-                    struct.unpack_from(f"{endian}IBBHQQ", sym_data, off)
-            else:
-                st_name, st_value, st_size, st_info, _, _ = \
-                    struct.unpack_from(f"{endian}IIIBBH", sym_data, off)
-        except struct.error:
-            break
-        if st_name == 0 or st_value == 0:
-            continue
-        end  = str_data.find(b"\x00", st_name)
-        name = str_data[st_name:end].decode("utf-8", errors="replace") if end >= 0 else ""
-        if name:
-            out.append({"name": name, "addr": st_value,
-                        "size": st_size, "st_type": st_info & 0xF})
-    return out
+          # ── ELF header ──────────────────────────────────────────────────────────
+          if len(data) < 64 or data[:4] != b"\x7fELF":
+              print("ERROR: not a valid ELF file")
+              sys.exit(1)
+          endian = "<" if data[5] == 1 else ">"
+          is64   = (data[4] == 2)
+          print(f"ELF: {'64-bit' if is64 else '32-bit'}  endian={'LE' if endian=='<' else 'BE'}")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# ARM64 ADRP xref engine
-# ══════════════════════════════════════════════════════════════════════════════
-def _arm64_find_prologue(text_mv, ref_idx, max_back=256):
-    STP_MASK  = 0xFF00FFFF; STP_MATCH = 0xA9007BFD
-    SUB_MASK  = 0xFFC003FF; SUB_MATCH = 0xD10003FF
-    raw = bytes(text_mv)
-    limit = min(max_back, ref_idx)
-    for back in range(0, limit + 4, 4):
-        idx = ref_idx - back
-        if idx < 0:
-            break
-        chunk = raw[idx:idx+4]
-        if len(chunk) < 4:
-            break
-        instr = struct.unpack("<I", chunk)[0]
-        if (instr & STP_MASK) == STP_MATCH or (instr & SUB_MASK) == SUB_MATCH:
-            return idx
-    return ref_idx
+          # ── Section headers ──────────────────────────────────────────────────────
+          if is64:
+              e_shoff     = struct.unpack_from(f"{endian}Q", data, 40)[0]
+              e_shentsize = struct.unpack_from(f"{endian}H", data, 58)[0]
+              e_shnum     = struct.unpack_from(f"{endian}H", data, 60)[0]
+              e_shstrndx  = struct.unpack_from(f"{endian}H", data, 62)[0]
+          else:
+              e_shoff     = struct.unpack_from(f"{endian}I", data, 32)[0]
+              e_shentsize = struct.unpack_from(f"{endian}H", data, 46)[0]
+              e_shnum     = struct.unpack_from(f"{endian}H", data, 48)[0]
+              e_shstrndx  = struct.unpack_from(f"{endian}H", data, 50)[0]
 
+          sections = []
+          shstrtab = b""
+          if e_shoff and e_shentsize and e_shnum and e_shstrndx < e_shnum:
+              sstr_off_raw = e_shoff + e_shstrndx * e_shentsize
+              try:
+                  if is64:
+                      _, _, _, _, so, ss, _, _, _, _ = struct.unpack_from(f"{endian}IIQQQQIIQQ", data, sstr_off_raw)
+                  else:
+                      _, _, _, _, so, ss, _, _, _, _ = struct.unpack_from(f"{endian}IIIIIIIIII", data, sstr_off_raw)
+                  shstrtab = data[so:so + ss]
+              except Exception:
+                  pass
+              for i in range(min(e_shnum, 512)):
+                  off = e_shoff + i * e_shentsize
+                  if off + e_shentsize > len(data):
+                      break
+                  try:
+                      if is64:
+                          ni, sh_type, _, _, sh_off, sh_sz, sh_link, _, _, _ = struct.unpack_from(f"{endian}IIQQQQIIQQ", data, off)
+                      else:
+                          ni, sh_type, _, _, sh_off, sh_sz, sh_link, _, _, _ = struct.unpack_from(f"{endian}IIIIIIIIII", data, off)
+                      end  = shstrtab.find(b"\x00", ni)
+                      name = shstrtab[ni:end].decode("utf-8", errors="replace") if end >= ni else ""
+                      sections.append({"name": name, "type": sh_type, "off": sh_off, "sz": sh_sz, "link": sh_link})
+                  except struct.error:
+                      break
 
-def _arm64_adrp_xref(data, text_off, text_vma, text_size, page_map, segments):
-    end_off = min(text_off + text_size, len(data))
-    if end_off - text_off < 8:
-        return []
-    mv      = memoryview(data)
-    text_mv = mv[text_off:end_off]
-    n       = len(text_mv) - 8
-    results = []
-    seen_fns = set()
-    raw     = bytes(text_mv)
-    i = 0
-    while i < n:
-        if raw[i + 3] & 0x9F != 0x90:
-            i += 4; continue
-        instr = struct.unpack_from("<I", raw, i)[0]
-        if (instr & 0x9F000000) != 0x90000000:
-            i += 4; continue
-        pc_vma  = text_vma + i
-        immlo   = (instr >> 29) & 3
-        immhi   = (instr >> 5)  & 0x7FFFF
-        imm21   = (immhi << 2) | immlo
-        if imm21 & 0x100000:
-            imm21 -= 0x200000
-        target_page = (pc_vma & ~0xFFF) + (imm21 << 12)
-        if target_page not in page_map:
-            i += 4; continue
-        next_instr = struct.unpack_from("<I", raw, i + 4)[0]
-        if (next_instr & 0xFFC00000) != 0x91000000:
-            i += 4; continue
-        add_imm12 = (next_instr >> 10) & 0xFFF
-        for (poff, target_vma) in page_map[target_page]:
-            if add_imm12 != poff:
-                continue
-            prologue_idx = _arm64_find_prologue(text_mv, i)
-            func_foff    = text_off + prologue_idx
-            if func_foff not in seen_fns:
-                seen_fns.add(func_foff)
-                results.append((func_foff, target_vma))
-            break
-        i += 4
-    return results
+          print(f"Sections: {len(sections)}")
 
+          # ── PT_LOAD segments (for VMA→offset) ───────────────────────────────────
+          if is64:
+              e_phoff     = struct.unpack_from(f"{endian}Q", data, 32)[0]
+              e_phentsize = struct.unpack_from(f"{endian}H", data, 54)[0]
+              e_phnum     = struct.unpack_from(f"{endian}H", data, 56)[0]
+          else:
+              e_phoff     = struct.unpack_from(f"{endian}I", data, 28)[0]
+              e_phentsize = struct.unpack_from(f"{endian}H", data, 42)[0]
+              e_phnum     = struct.unpack_from(f"{endian}H", data, 44)[0]
 
-def _adrp_recover_symbols(data, segments, sections, endian, is64):
-    if not is64:
-        return []
-    text_sec = next((s for s in sections if s["name"] == ".text"), None)
-    if text_sec is None:
-        for seg in segments:
-            if seg["type"] == 1 and (seg["flags"] & 1):
-                text_sec = {"addr": seg["vaddr"], "offset": seg["offset"], "size": seg["filesz"]}
-                break
-    if text_sec is None:
-        return []
-    text_vma  = text_sec["addr"]
-    text_off  = text_sec["offset"]
-    text_size = text_sec["size"]
-    print(f"ADRP: .text vma=0x{text_vma:x}  foff=0x{text_off:x}  size={text_size//1024}KB")
+          segments = []
+          for i in range(min(e_phnum, 96)):
+              off = e_phoff + i * e_phentsize
+              if off + e_phentsize > len(data):
+                  break
+              try:
+                  if is64:
+                      p_type, _ = struct.unpack_from(f"{endian}II", data, off)
+                      p_offset, p_vaddr, _, p_filesz = struct.unpack_from(f"{endian}QQQQ", data, off + 8)
+                  else:
+                      p_type, p_offset, p_vaddr, _, p_filesz = struct.unpack_from(f"{endian}IIIII", data, off)
+                  if p_type == 1:
+                      segments.append({"offset": p_offset, "vaddr": p_vaddr, "filesz": p_filesz})
+              except struct.error:
+                  break
 
-    rodata_sec = next((s for s in sections if s["name"] == ".rodata"), None)
-    if rodata_sec:
-        scan_off = rodata_sec["offset"]; scan_size = rodata_sec["size"]; scan_vma = rodata_sec["addr"]
-    else:
-        rodata_seg = next((seg for seg in segments
-                           if seg["type"] == 1 and not (seg["flags"] & 1) and seg["filesz"] > 1024), None)
-        if rodata_seg:
-            scan_off = rodata_seg["offset"]; scan_size = rodata_seg["filesz"]; scan_vma = rodata_seg["vaddr"]
-        else:
-            scan_off = 0; scan_size = len(data); scan_vma = 0
+          def vma_to_off(vma):
+              for seg in segments:
+                  if seg["vaddr"] <= vma < seg["vaddr"] + seg["filesz"]:
+                      return vma - seg["vaddr"] + seg["offset"]
+              return vma
 
-    scan_end = min(scan_off + scan_size, len(data))
-    PREFIXES = (b"_ZN", b"_ZT", b"_ZL", b"_ZZ")
-    mangled  = []
-    i = scan_off
-    while i < scan_end - 4:
-        if data[i:i+3] in PREFIXES:
-            j = i; lim = min(i + 512, scan_end)
-            while j < lim and 0x20 <= data[j] <= 0x7E:
-                j += 1
-            if j < scan_end and data[j] == 0 and j - i >= 6:
-                name = data[i:j].decode("ascii", errors="replace")
-                vma  = scan_vma + (i - scan_off)
-                mangled.append((i, vma, name))
-                i = j; continue
-        i += 1
-    print(f"ADRP: {len(mangled)} mangled strings in .rodata")
-    if not mangled:
-        return []
+          # ── Read SHT_SYMTAB (type=2) and SHT_DYNSYM (type=11) ───────────────────
+          KEYWORDS = {
+              "coin":9,"gold":9,"gem":9,"diamond":9,"cash":8,"money":8,
+              "health":8,"hp":8,"life":8,"lives":7,"heart":7,"energy":7,
+              "unlock":8,"premium":8,"vip":7,"purchase":8,"buy":7,
+              "speed":7,"damage":6,"score":7,"point":6,"reward":7,
+              "maxhp":9,"maxhealth":9,"infinite":10,"unlimited":10,
+              "invincib":10,"godmode":10,"revive":8,"cheat":10,"hack":10,
+              "ammo":8,"bullet":7,"weapon":7,"gun":7,"fuel":8,"nitro":8,
+              "soldier":6,"jetpack":8,"boost":7,"player":5,"enemy":6,
+              "boss":7,"kill":6,"dead":6,"alive":7,"level":5,"stage":5,
+          }
 
-    page_map = {}
-    for (foff, vma, name) in mangled:
-        page = vma & ~0xFFF; poff = vma & 0xFFF
-        if page not in page_map:
-            page_map[page] = []
-        page_map[page].append((poff, vma))
+          TYPE_MAP = {0:"NOTYPE",1:"OBJECT",2:"FUNC",3:"SECTION",4:"FILE"}
 
-    print(f"ADRP: scanning {text_size//1024}KB .text...")
-    xrefs = _arm64_adrp_xref(data, text_off, text_vma, text_size, page_map, segments)
-    print(f"ADRP: {len(xrefs)} xrefs recovered")
+          def read_symtab(sh_type):
+              sec = next((s for s in sections if s["type"] == sh_type), None)
+              if sec is None or sec["sz"] == 0:
+                  return []
+              lnk = sec["link"]
+              if lnk <= 0 or lnk >= len(sections):
+                  return []
+              str_sec  = sections[lnk]
+              str_data = data[str_sec["off"]: str_sec["off"] + str_sec["sz"]]
+              sym_data = data[sec["off"]: sec["off"] + sec["sz"]]
+              entsize  = 24 if is64 else 16
+              out = []
+              for i in range(len(sym_data) // entsize):
+                  o = i * entsize
+                  if o + entsize > len(sym_data):
+                      break
+                  try:
+                      if is64:
+                          st_name, st_info, _, _, st_value, st_size = struct.unpack_from(f"{endian}IBBHQQ", sym_data, o)
+                      else:
+                          st_name, st_value, st_size, st_info, _, _ = struct.unpack_from(f"{endian}IIIBBH", sym_data, o)
+                  except struct.error:
+                      break
+                  if st_name == 0 or st_value == 0:
+                      continue
+                  end  = str_data.find(b"\x00", st_name)
+                  name = str_data[st_name:end].decode("utf-8", errors="replace") if end >= 0 else ""
+                  if name:
+                      out.append({"name": name, "addr": st_value, "size": st_size, "stype": st_info & 0xF})
+              return out
 
-    vma_to_name = {vma: name for (_, vma, name) in mangled}
-    found_vmas  = {tv for (_, tv) in xrefs}
-    results     = []
-    for (func_foff, target_vma) in xrefs:
-        name = vma_to_name.get(target_vma, "")
-        if name:
-            results.append({"name": name, "addr": func_foff, "size": 0, "st_type": 2, "is_foff": True})
-    for (foff, vma, name) in mangled:
-        if vma not in found_vmas:
-            results.append({"name": name, "addr": foff, "size": 0, "st_type": 0, "is_foff": True})
-    return results
+          raw_syms = []
+          s1 = read_symtab(2)
+          if s1:
+              print(f"SHT_SYMTAB: {len(s1)} entries")
+              raw_syms.extend(s1)
+          s2 = read_symtab(11)
+          if s2:
+              print(f"SHT_DYNSYM: {len(s2)} entries")
+              raw_syms.extend(s2)
 
+          seen = set()
+          symbols = []
+          for s in raw_syms:
+              name = s.get("name", "")
+              if not name or name in seen:
+                  continue
+              seen.add(name)
+              foff  = vma_to_off(s["addr"])
+              stype = TYPE_MAP.get(s["stype"], "NOTYPE")
+              score = sum(pts for kw, pts in KEYWORDS.items() if kw in name.lower())
+              symbols.append({"name": name, "offset": f"0x{foff:x}", "size": s["size"],
+                              "type": stype, "score": score})
 
-def _parse_elf_symbols(data):
-    elf = _elf_parse(data)
-    if elf is None:
-        return []
-    endian   = elf["endian"]
-    is64     = elf["is64"]
-    sections = elf["sections"]
-    segments = elf["segments"]
-    print(f"ELF: {'64-bit' if is64 else '32-bit'}  {len(sections)} sections  {len(segments)} segments")
+          symbols.sort(key=lambda x: (-x["score"], x["name"]))
+          print(f"Total symbols: {len(symbols)}")
 
-    raw_syms = []
-    s1 = _elf_read_symtab(data, endian, is64, sections, 2)   # SHT_SYMTAB
-    if s1:
-        print(f"SHT_SYMTAB: {len(s1)} entries")
-        raw_syms.extend(s1)
-    s2 = _elf_read_symtab(data, endian, is64, sections, 11)  # SHT_DYNSYM
-    if s2:
-        print(f"SHT_DYNSYM: {len(s2)} entries")
-        raw_syms.extend(s2)
-    if not raw_syms:
-        print("Symbol tables empty — running ARM64 ADRP xref...")
-        raw_syms = _adrp_recover_symbols(data, segments, sections, endian, is64)
+          # ── String scan ──────────────────────────────────────────────────────────
+          print("String scan …")
+          strings = []
+          cur = []; start = 0
+          for i, b in enumerate(data):
+              if 0x20 <= b <= 0x7E:
+                  if not cur:
+                      start = i
+                  cur.append(chr(b))
+              else:
+                  s = "".join(cur)
+                  if 6 <= len(s) <= 120:
+                      sc = sum(pts for kw, pts in KEYWORDS.items() if kw in s.lower())
+                      strings.append({"value": s, "offset": f"0x{start:x}", "score": sc})
+                  cur = []
+          strings.sort(key=lambda x: -x["score"])
+          print(f"Strings: {len(strings)}")
 
-    if not raw_syms:
-        print("No symbols recovered — binary is fully stripped")
-        return []
+          with open("output/symbols.json", "w") as f:
+              json.dump(symbols, f)
+          with open("output/strings.json", "w") as f:
+              json.dump(strings[:5000], f)
+          print("Saved symbols.json + strings.json")
+          EOF
 
-    TYPE_MAP = {0: "NOTYPE", 1: "OBJECT", 2: "FUNC", 3: "SECTION", 4: "FILE"}
-    seen     = set()
-    symbols  = []
-    for s in raw_syms:
-        name = s.get("name", "")
-        if not name or name in seen:
-            continue
-        seen.add(name)
-        addr    = s.get("addr", 0)
-        is_foff = s.get("is_foff", False)
-        foff    = addr if is_foff else _elf_vma_to_off(addr, segments)
-        stype   = TYPE_MAP.get(s.get("st_type", 0), "NOTYPE")
-        score   = sum(pts for kw, pts in _KEYWORDS.items() if kw in name.lower())
-        symbols.append({"name": name, "offset": f"0x{foff:x}" if foff else f"0x{addr:x}",
-                         "size": s.get("size", 0), "type": stype, "score": score})
+      - name: Generate output files
+        run: |
+          python3 - <<'EOF'
+          import json, os, re
+          from collections import OrderedDict
 
-    symbols.sort(key=lambda x: (-x["score"], x["name"]))
-    print(f"Total symbols: {len(symbols)}")
-    return symbols
+          symbols = json.load(open("output/symbols.json"))
+          strings = json.load(open("output/strings.json"))
+          meta    = json.load(open("game_files/_meta.json"))
 
-# ══════════════════════════════════════════════════════════════════════════════
-# STRING SCANNER
-# ══════════════════════════════════════════════════════════════════════════════
-def _scan_strings(data, min_len=6, max_len=120):
-    total = len(data); mb = total // 1_048_576 or 1
-    print(f"String scan: {mb} MB...")
-    results = []; cur = []; start = 0; last_report = 0
-    for i, b in enumerate(data):
-        if 0x20 <= b <= 0x7E:
-            if not cur:
-                start = i
-            cur.append(chr(b))
-        else:
-            s = "".join(cur)
-            if min_len <= len(s) <= max_len:
-                score = sum(pts for kw, pts in _KEYWORDS.items() if kw in s.lower())
-                results.append({"value": s, "offset": f"0x{start:x}", "score": score})
-            cur = []
-        chunk = i // 4_194_304
-        if chunk != last_report:
-            last_report = chunk
-            pct = min(99, (i * 100) // total)
-            print(f"  Scanning... {pct}% — {len(results)} strings so far")
-    results.sort(key=lambda x: -x["score"])
-    print(f"String scan done — {len(results)} total")
-    return results
+          # ── Demangler ────────────────────────────────────────────────────────────
+          def demangle(mangled):
+              if not mangled.startswith("_ZN"):
+                  return None, None
+              pos = 3; parts = []; n = len(mangled)
+              while pos < n:
+                  ch = mangled[pos]
+                  if ch == 'C' and pos + 1 < n and mangled[pos + 1] in '012':
+                      if parts: parts.append(parts[-1])
+                      break
+                  if ch == 'D' and pos + 1 < n and mangled[pos + 1] in '012':
+                      if parts: parts.append('~' + parts[-1])
+                      break
+                  if ch == 'E':
+                      break
+                  if ch.isdigit():
+                      end = pos
+                      while end < n and mangled[end].isdigit():
+                          end += 1
+                      length = int(mangled[pos:end]); pos = end
+                      if pos + length > n:
+                          break
+                      parts.append(mangled[pos: pos + length]); pos += length; continue
+                  break
+              if len(parts) < 2:
+                  return None, None
+              return parts[:-1], parts[-1]
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SCORING
-# ══════════════════════════════════════════════════════════════════════════════
-def _score_symbols_and_strings(symbols, strings):
-    items = []
-    for s in symbols:
-        items.append({"kind": "symbol", "name": s["name"], "offset": s["offset"],
-                      "score": s["score"], "type": s["type"], "value": ""})
-    for s in strings:
-        items.append({"kind": "string", "name": s["value"], "offset": s["offset"],
-                      "score": s["score"], "type": "STRING", "value": s["value"]})
-    items.sort(key=lambda x: -x["score"])
-    return items
+          # ── dump.cpp ──────────────────────────────────────────────────────────────
+          classes   = OrderedDict()
+          ungrouped = []
+          for sym in symbols:
+              raw  = sym.get("name", "")
+              off  = sym.get("offset", "0x0")
+              stype = sym.get("type", "NOTYPE")
+              if stype == "NOTYPE":
+                  continue
+              cls_parts, method = demangle(raw)
+              if cls_parts is None:
+                  ungrouped.append((off, raw, stype))
+                  continue
+              cls_name = "::".join(cls_parts)
+              classes.setdefault(cls_name, []).append((off, method, stype))
 
-# ══════════════════════════════════════════════════════════════════════════════
-# C++ DEMANGLER + dump.cpp GENERATOR
-# ══════════════════════════════════════════════════════════════════════════════
-def _demangle_simple(mangled):
-    if not mangled.startswith("_ZN"):
-        return None, None
-    pos = 3; parts = []; n = len(mangled)
-    while pos < n:
-        ch = mangled[pos]
-        if ch == 'C' and pos + 1 < n and mangled[pos + 1] in '012':
-            if parts: parts.append(parts[-1])
-            pos += 2; break
-        if ch == 'D' and pos + 1 < n and mangled[pos + 1] in '012':
-            if parts: parts.append('~' + parts[-1])
-            pos += 2; break
-        if ch == 'E':
-            pos += 1; break
-        if ch.isdigit():
-            end = pos
-            while end < n and mangled[end].isdigit():
-                end += 1
-            length = int(mangled[pos:end]); pos = end
-            if pos + length > n:
-                break
-            parts.append(mangled[pos: pos + length]); pos += length; continue
-        break
-    if len(parts) < 2:
-        return None, None
-    return parts[:-1], parts[-1]
+          with open("output/dump.cpp", "w", encoding="utf-8") as f:
+              f.write("// Taurus Shield — Cocos2d-x C++ Class Dump\n")
+              f.write(f"// Classes : {len(classes)}\n")
+              f.write(f"// Symbols : {len(symbols)}\n\n")
+              if classes:
+                  f.write("// ═══════════════════════════════════\n")
+                  f.write("// C++ CLASSES\n")
+                  f.write("// ═══════════════════════════════════\n\n")
+                  for cls_name, methods in sorted(classes.items()):
+                      f.write(f"class {cls_name} {{\n")
+                      for off, meth, st in sorted(methods, key=lambda x: x[0]):
+                          f.write(f"    // {off:<14}  void {meth}();\n")
+                      f.write("};\n\n")
+              if ungrouped:
+                  f.write("// ── extern / non-class symbols ──────\n")
+                  for off, raw, st in ungrouped:
+                      f.write(f"// {off:<14}  [{st}]  {raw}\n")
+              if not classes and not ungrouped:
+                  f.write("// STRIPPED — no symbol table found\n")
+                  for s in strings[:100]:
+                      f.write(f'// [{s["offset"]}]  "{s["value"]}"\n')
 
+          print(f"dump.cpp: {len(classes)} classes  {len(ungrouped)} extern symbols")
 
-def _generate_cpp_dump(symbols, strings, output_dir):
-    classes   = OrderedDict()
-    ungrouped = []
-    str_anchors = []
-    for sym in (symbols or []):
-        raw      = sym.get("name", "")
-        offset   = sym.get("offset", "0x0")
-        sym_type = sym.get("type", "NOTYPE")
-        if sym_type == "NOTYPE":
-            str_anchors.append((offset, raw)); continue
-        class_parts, method = _demangle_simple(raw)
-        if class_parts is None:
-            ungrouped.append((offset, raw, sym_type)); continue
-        class_name = "::".join(class_parts)
-        if class_name not in classes:
-            classes[class_name] = []
-        classes[class_name].append((offset, method, sym_type))
+          # ── symbols.txt ───────────────────────────────────────────────────────────
+          with open("output/symbols.txt", "w", encoding="utf-8") as f:
+              f.write("// Taurus Shield — Cocos2d-x Symbol Dump\n")
+              f.write(f"// Symbols : {len(symbols)}\n\n")
+              f.write(f"{'Offset':<14}  {'Type':<10}  {'Size':<8}  Name\n")
+              f.write("-" * 80 + "\n")
+              for s in symbols:
+                  f.write(f"{s['offset']:<14}  {s['type']:<10}  {str(s['size']):<8}  {s['name']}\n")
 
-    n_func_syms = sum(1 for s in (symbols or []) if s.get("type") != "NOTYPE")
-    dump_path = os.path.join(output_dir, "dump.cpp")
-    with open(dump_path, "w", encoding="utf-8") as f:
-        f.write("// Taurus Shield — Cocos2d-x C++ Class Dump\n")
-        f.write(f"// Classes  : {len(classes)}\n")
-        f.write(f"// Symbols  : {n_func_syms}  (FUNC/OBJECT)\n")
-        f.write(f"// Anchors  : {len(str_anchors)}  (ADRP string-only)\n\n")
-        if classes:
-            f.write("// ═══════════════════════════════════════════════════════\n")
-            f.write("// C++ CLASSES\n")
-            f.write("// ═══════════════════════════════════════════════════════\n\n")
-            for class_name, methods in sorted(classes.items()):
-                f.write(f"class {class_name} {{\n")
-                for offset, meth, stype in sorted(methods, key=lambda x: x[0]):
-                    f.write(f"    // offset: {offset:<14} void {meth}();\n")
-                f.write("};\n\n")
-        if ungrouped:
-            f.write("// ── Non-class / extern symbols ──────────────────────────\n")
-            for offset, raw, stype in ungrouped:
-                f.write(f"// {offset:<14}  [{stype}]  {raw}\n")
-            f.write("\n")
-        if str_anchors:
-            f.write("// ── ADRP string anchors (rodata offset) ─────────────────\n")
-            for offset, raw in str_anchors[:200]:
-                f.write(f"// [{offset}]  {raw}\n")
-            f.write("\n")
-        if not classes and not ungrouped and not str_anchors:
-            f.write("// ── STRIPPED BINARY — no symbols recovered ───────────────\n")
-            for s in (strings or [])[:100]:
-                f.write(f'// [{s.get("offset","0x0")}] score={s.get("score",0):<3}  "{s.get("value","")}\"\n')
-    return dump_path, len(classes)
+          # ── strings.txt ───────────────────────────────────────────────────────────
+          with open("output/strings.txt", "w", encoding="utf-8") as f:
+              f.write("// Taurus Shield — String Scan\n")
+              f.write(f"// Strings : {len(strings)}\n\n")
+              for s in strings:
+                  f.write(f"{s['offset']:<14}  score={s['score']:<3}  {s['value']}\n")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN
-# ══════════════════════════════════════════════════════════════════════════════
-print("=== Taurus Shield — Cocos2d-x Cloud Analyser ===\n")
+          # ── interesting.txt ───────────────────────────────────────────────────────
+          interesting = [s for s in symbols if s.get("score", 0) > 0]
+          interesting += [{"name": s["value"], "offset": s["offset"],
+                           "score": s["score"], "type": "STRING"}
+                          for s in strings if s.get("score", 0) > 0]
+          interesting.sort(key=lambda x: -x["score"])
+          with open("output/interesting.txt", "w", encoding="utf-8") as f:
+              f.write("// Taurus Shield — Top Patchable Items\n")
+              f.write(f"// Items : {len(interesting)}\n\n")
+              for item in interesting:
+                  f.write(f"[score={item['score']:<3}]  {item['name']:<60}  @ {item['offset']}\n")
 
-# 1. Extract slim ZIP
-meta = {}
-with zipfile.ZipFile("input.zip") as z:
-    names = z.namelist()
-    print(f"ZIP entries ({len(names)}): {names}")
-    if "_meta.json" in names:
-        meta = json.loads(z.read("_meta.json"))
-        print(f"Meta: {meta}")
-    for n in names:
-        if n == "_meta.json" or n.endswith("/"):
-            continue
-        raw_data = z.read(n)
-        dest = os.path.join("game_files", n)
-        os.makedirs(os.path.dirname(dest) if os.path.dirname(dest) else ".", exist_ok=True)
-        with open(dest, "wb") as f:
-            f.write(raw_data)
+          # ── cocos_analysis.json ───────────────────────────────────────────────────
+          result = {
+              "game_type": "native",
+              "game":      meta.get("game", ""),
+              "symbols":   symbols,
+              "strings":   strings,
+              "interesting": interesting,
+          }
+          with open("output/cocos_analysis.json", "w", encoding="utf-8") as f:
+              json.dump(result, f, indent=2, ensure_ascii=False)
 
-so_path = "game_files/libcocos2dcpp.so"
-if not os.path.exists(so_path):
-    print("ERROR: libcocos2dcpp.so not in slim ZIP"); sys.exit(1)
+          print(f"Output files: {sorted(os.listdir('output'))}")
+          sz = os.path.getsize("output/cocos_analysis.json") // 1024
+          print(f"cocos_analysis.json: {sz} KB")
+          if interesting:
+              print(f"\nTop 15 patchable items:")
+              for item in interesting[:15]:
+                  print(f"  score={item['score']:>3}  {item['offset']}  {item['name'][:60]}")
+          EOF
 
-with open(so_path, "rb") as f:
-    so_data = f.read()
-print(f"\nlibcocos2dcpp.so: {len(so_data)//1_048_576} MB")
+      - name: Handle Lua / JS games
+        run: |
+          python3 - <<'EOF'
+          import json, os, re
 
-hint = meta.get("game_type_hint", "native")
-game_type = hint if hint in ("lua", "js", "native") else "native"
-print(f"Game type: {game_type.upper()}\n")
+          game_type = open("game_files/_type.txt").read().strip()
+          if game_type == "native":
+              print("Native game — Lua/JS step skipped")
+              exit(0)
 
-# 2. Native — full ELF engine
-if game_type == "native":
-    print("=== Pass 1+2: SHT_SYMTAB + SHT_DYNSYM ===")
-    symbols = _parse_elf_symbols(so_data)
+          print(f"Script game type: {game_type.upper()}")
+          KEYWORDS = {
+              "coin":9,"gold":9,"gem":9,"diamond":9,"cash":8,"money":8,
+              "health":8,"hp":8,"life":8,"lives":7,"heart":7,"energy":7,
+              "unlock":8,"premium":8,"vip":7,"purchase":8,"buy":7,
+              "speed":7,"damage":6,"score":7,"point":6,"reward":7,
+              "infinite":10,"unlimited":10,"invincib":10,"godmode":10,
+              "revive":8,"cheat":10,"hack":10,
+          }
+          def score(name):
+              return sum(p for k, p in KEYWORDS.items() if k in name.lower())
 
-    print("\n=== String scan ===")
-    strings = _scan_strings(so_data)
+          script_files = []
+          for root, _, files in os.walk("game_files"):
+              for fn in files:
+                  if any(fn.endswith(ext) for ext in (".lua",".luac",".js",".jsc",".js.enc")):
+                      fp = os.path.join(root, fn)
+                      rel = os.path.relpath(fp, "game_files")
+                      with open(fp, "rb") as f:
+                          script_files.append((rel, f.read()))
 
-    interesting = _score_symbols_and_strings(symbols, strings)
-    result = {"game_type": "native", "game": meta.get("game", ""),
-              "symbols": symbols, "strings": strings[:5000], "interesting": interesting}
+          values = []
+          for rel_path, raw in script_files:
+              try:
+                  text = raw.decode("utf-8", errors="replace")
+              except Exception:
+                  continue
+              for lineno, line in enumerate(text.splitlines(), 1):
+                  stripped = line.strip()
+                  if stripped.startswith(("--", "//", "#")):
+                      continue
+                  m = re.match(r'^(?:local\s+)?([\w.:]+)\s*=\s*(-?\d+(?:\.\d+)?)\s*(?:--.*|//.*)?$', stripped)
+                  if m:
+                      values.append({"file": rel_path, "var": m.group(1), "value": m.group(2),
+                                     "line": lineno, "score": score(m.group(1)),
+                                     "is_bool": False, "find_str": stripped})
+                      continue
+                  mb = re.match(r'^(?:local\s+)?([\w.:]+)\s*=\s*(true|false)\s*(?:--.*|//.*)?$', stripped, re.I)
+                  if mb:
+                      values.append({"file": rel_path, "var": mb.group(1), "value": mb.group(2).lower(),
+                                     "line": lineno, "score": score(mb.group(1)),
+                                     "is_bool": True, "find_str": stripped})
+          values.sort(key=lambda x: -x["score"])
 
-    print("\n=== Writing dump.cpp ===")
-    _, n_classes = _generate_cpp_dump(symbols, strings, "output")
-    print(f"dump.cpp: {n_classes} classes")
+          meta = json.load(open("game_files/_meta.json"))
+          result = {"game_type": game_type, "game": meta.get("game",""), "interesting": values}
+          with open("output/cocos_analysis.json", "w") as f:
+              json.dump(result, f, indent=2, ensure_ascii=False)
+          with open("output/interesting.txt", "w") as f:
+              f.write(f"// Script values: {len(values)}\n\n")
+              for v in values:
+                  f.write(f"[score={v['score']:<3}]  {v['var']:<40}  = {v['value']}  ({v['file']}:{v['line']})\n")
 
-    with open("output/symbols.txt", "w", encoding="utf-8") as f:
-        f.write("// Taurus Shield — Cocos2d-x Symbol Dump\n")
-        f.write(f"// Symbols : {len(symbols)}\n\n")
-        f.write(f"{'Offset':<14}  {'Type':<10}  {'Size':<8}  Name\n")
-        f.write("-" * 80 + "\n")
-        for s in symbols:
-            f.write(f"{s.get('offset','0x0'):<14}  {s.get('type','NOTYPE'):<10}  "
-                    f"{str(s.get('size',0)):<8}  {s.get('name','')}\n")
-
-    with open("output/strings.txt", "w", encoding="utf-8") as f:
-        f.write("// Taurus Shield — Cocos2d-x String Scan\n")
-        f.write(f"// Strings : {len(strings)}\n\n")
-        for s in strings[:10000]:
-            f.write(f"{s.get('offset','0x0'):<14}  score={s.get('score',0):<3}  {s.get('value','')}\n")
-
-    with open("output/interesting.txt", "w", encoding="utf-8") as f:
-        f.write("// Taurus Shield — Top Patchable Items\n")
-        f.write(f"// Items  : {len(interesting)}\n\n")
-        for item in interesting:
-            f.write(f"[score={item.get('score',0):<3}]  "
-                    f"{item.get('name',''):<60}  @ {item.get('offset','')}\n")
-
-# 3. Lua / JS
-else:
-    script_files = []
-    for root, _, files in os.walk("game_files"):
-        for fn in files:
-            fp = os.path.join(root, fn)
-            rel = os.path.relpath(fp, "game_files")
-            if any(fn.endswith(ext) for ext in (".lua", ".luac", ".js", ".jsc", ".js.enc")):
-                with open(fp, "rb") as f:
-                    script_files.append((rel, f.read()))
-
-    def score(name):
-        low = name.lower()
-        return sum(p for k, p in _KEYWORDS.items() if k in low)
-
-    values = []
-    for rel_path, raw in script_files:
-        try:
-            text = raw.decode("utf-8", errors="replace")
-        except Exception:
-            continue
-        for lineno, line in enumerate(text.splitlines(), 1):
-            stripped = line.strip()
-            if stripped.startswith(("--", "//", "#")):
-                continue
-            m = re.match(r'^(?:local\s+)?([\w.:\[\]"\']+)\s*=\s*'
-                         r'(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*(?:--.*|//.*)?$', stripped)
-            if m:
-                values.append({"file": rel_path, "var": m.group(1), "value": m.group(2),
-                               "line": lineno, "score": score(m.group(1)), "is_bool": False,
-                               "find_str": stripped}); continue
-            mb = re.match(r'^(?:local\s+)?([\w.:\[\]"\']+)\s*=\s*(true|false)\s*(?:--.*|//.*)?$',
-                          stripped, re.IGNORECASE)
-            if mb:
-                values.append({"file": rel_path, "var": mb.group(1), "value": mb.group(2).lower(),
-                               "line": lineno, "score": score(mb.group(1)), "is_bool": True,
-                               "find_str": stripped})
-    values.sort(key=lambda x: -x["score"])
-    result = {"game_type": game_type, "game": meta.get("game", ""), "interesting": values}
-    interesting = values; symbols = []
-    print(f"Script values: {len(values)}")
-
-# 4. Write JSON
-out_path = "output/cocos_analysis.json"
-with open(out_path, "w", encoding="utf-8") as f:
-    json.dump(result, f, indent=2, ensure_ascii=False)
-
-scored = sum(1 for x in interesting if x.get("score", 0) > 0)
-print(f"\ncocos_analysis.json: {os.path.getsize(out_path)//1024} KB")
-print(f"Output files: {sorted(os.listdir('output'))}")
-if symbols:
-    print(f"\nTop 20 scored symbols:")
-    for s in [x for x in symbols if x.get("score", 0) > 0][:20]:
-        print(f"  score={s['score']:>3}  {s['offset']}  {s['name']}")
-PYEOF
+          print(f"Script values found: {len(values)}")
+          print(f"Output: {sorted(os.listdir('output'))}")
+          EOF
 
       - name: Upload results artifact
         uses: actions/upload-artifact@v4
@@ -628,12 +477,9 @@ PYEOF
 
       - name: Summary
         run: |
-          echo "## Cocos2d-x Analysis Complete ✅" >> $GITHUB_STEP_SUMMARY
+          echo "## Cocos2d-x Analysis Complete" >> $GITHUB_STEP_SUMMARY
           echo "- **Job ID:** ${{ inputs.job_id }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Artifact:** cocos-dump-${{ inputs.job_id }} (7-day retention)" >> $GITHUB_STEP_SUMMARY
-          if [ -f output/dump.cpp ]; then
-            CLASSES=$(grep -c "^class " output/dump.cpp 2>/dev/null || echo 0)
-            echo "- **dump.cpp:** $CLASSES classes" >> $GITHUB_STEP_SUMMARY
-          fi
-          [ -f output/symbols.txt ] && echo "- **symbols.txt:** $(wc -l < output/symbols.txt) lines" >> $GITHUB_STEP_SUMMARY || true
+          [ -f output/dump.cpp ] && echo "- **dump.cpp classes:** $(grep -c '^class ' output/dump.cpp 2>/dev/null || echo 0)" >> $GITHUB_STEP_SUMMARY || true
+          [ -f output/symbols.txt ] && echo "- **symbols.txt lines:** $(wc -l < output/symbols.txt)" >> $GITHUB_STEP_SUMMARY || true
           [ -f output/cocos_analysis.json ] && echo "- **cocos_analysis.json:** $(du -sh output/cocos_analysis.json | cut -f1)" >> $GITHUB_STEP_SUMMARY || true
