@@ -342,7 +342,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: game-dump-${{ inputs.job_id }}
-          path: dump_out/
+          path: |
+            dump_out/**
+            !dump_out/DummyDlls/**
+            !dump_out/il2cpp.h
+            !dump_out/stringliteral.json
+            !dump_out/ida.py
+            !dump_out/ida_with_struct.py
+            !dump_out/ghidra.py
           retention-days: 7
       - name: Delete input asset
         run: |
