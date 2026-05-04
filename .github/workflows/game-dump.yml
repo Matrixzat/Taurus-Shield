@@ -269,6 +269,9 @@ jobs:
           upload_file dump_out/il2cpp.h           "dump_il2cpp_h_${JID}.txt"         "text/plain"
           upload_file dump_out/script.json        "dump_script_${JID}.json"          "application/json"
           upload_file dump_out/stringliteral.json "dump_stringliteral_${JID}.json"   "application/json"
+            upload_file dump_out/ida.py              "dump_ida_${JID}.py"               "text/plain"
+            upload_file dump_out/ida_with_struct.py  "dump_ida_struct_${JID}.py"        "text/plain"
+            upload_file dump_out/ghidra.py           "dump_ghidra_${JID}.py"            "text/plain"
       - name: Delete input asset
         run: |
           curl -s -L -X DELETE \
@@ -282,6 +285,6 @@ jobs:
           echo "- **Job ID:** ${{ inputs.job_id }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Il2CppDumper:** ${{ steps.il2cpp_ver.outputs.tag }} (cache hit: ${{ steps.cache_dumper.outputs.cache-hit }})" >> $GITHUB_STEP_SUMMARY
           echo "- **Offsets JSON:** dump_offsets_${{ inputs.job_id }}.json" >> $GITHUB_STEP_SUMMARY
-          echo "- **Extra dumps (if produced):** dump_cs · il2cpp_h · script_json · stringliteral" >> $GITHUB_STEP_SUMMARY
+          echo "- **Extra dumps (if produced):** dump_cs · il2cpp_h · script_json · stringliteral · ida · ida_struct · ghidra" >> $GITHUB_STEP_SUMMARY
           [ -f offsets.json ] && echo "- **offsets.json size:** $(du -sh offsets.json | cut -f1)" >> $GITHUB_STEP_SUMMARY || true
           echo "- **dump_out files:** $(ls dump_out/ 2>/dev/null | tr '\n' ' ' || echo empty)" >> $GITHUB_STEP_SUMMARY
