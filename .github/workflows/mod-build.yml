@@ -265,10 +265,15 @@ jobs:
             echo "armeabi-v7a libshadowhook.so not found in AAR — skipping"
           fi
 
+      - name: Install patchelf
+        run: |
+          sudo apt-get install -y patchelf
+          patchelf --version
+
       - name: Patch game APK
         run: |
           python3 - <<'PYEOF'
-          import zipfile, os, shutil
+          import zipfile, os, shutil, subprocess
 
           game_name = os.environ.get("GAME_NAME","game")
           os.makedirs("apk_work", exist_ok=True)
@@ -280,15 +285,46 @@ jobs:
 
               # Inject our hook .so
               src = f"mod_src/build-{abi}/libModEngine.so"
-              if os.path.exists(src):
-                  shutil.copy(src, f"{lib_dir}/libModEngine.so")
-                  print(f"Injected libModEngine.so → lib/{abi}/")
+              if not os.path.exists(src):
+                  print(f"WARNING: {src} missing — skipping {abi}")
+                  continue
+              shutil.copy(src, f"{lib_dir}/libModEngine.so")
+              print(f"Injected libModEngine.so → lib/{abi}/")
 
               # Bundle ShadowHook .so — required since we link it as shared
               shadow_src = f"shadowhook_libs/{abi}/libshadowhook.so"
               if os.path.exists(shadow_src):
                   shutil.copy(shadow_src, f"{lib_dir}/libshadowhook.so")
                   print(f"Bundled  libshadowhook.so → lib/{abi}/")
+
+              # === KEY FIX: inject libModEngine.so as a DT_NEEDED dependency of
+              # libil2cpp.so so Android's dynamic linker loads it automatically.
+              # Without this, nothing ever calls System.loadLibrary("ModEngine")
+              # and JNI_OnLoad never runs — all hooks are dead on arrival.
+              il2cpp = f"{lib_dir}/libil2cpp.so"
+              if os.path.exists(il2cpp):
+                  # Check existing NEEDED entries to avoid duplicates
+                  result = subprocess.run(
+                      ["patchelf", "--print-needed", il2cpp],
+                      capture_output=True, text=True)
+                  existing = result.stdout.strip().splitlines()
+                  print(f"  [{abi}] libil2cpp.so existing NEEDED: {existing}")
+
+                  if "libModEngine.so" not in existing:
+                      subprocess.run(
+                          ["patchelf", "--add-needed", "libModEngine.so", il2cpp],
+                          check=True)
+                      print(f"  [{abi}] ✅ libModEngine.so injected as DT_NEEDED into libil2cpp.so")
+                  else:
+                      print(f"  [{abi}] libModEngine.so already in NEEDED, skipping")
+
+                  # Verify
+                  result2 = subprocess.run(
+                      ["patchelf", "--print-needed", il2cpp],
+                      capture_output=True, text=True)
+                  print(f"  [{abi}] libil2cpp.so NEEDED after patch: {result2.stdout.strip()}")
+              else:
+                  print(f"WARNING: libil2cpp.so not found at {il2cpp}")
 
           # Read original compression per file — Unity streams game data directly,
           # compressing previously-uncompressed files causes "Not enough storage" errors.
