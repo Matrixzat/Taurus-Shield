@@ -70,7 +70,6 @@ jobs:
           echo "Found APK: $APK_PATH ($(wc -c < "$APK_PATH") bytes)"
           echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
 
-          # rules.txt is optional — if present, pass it to dpt.jar via -r
           RULES_PATH=$(find extracted/ -name "rules.txt" -type f | head -1)
           if [ -n "$RULES_PATH" ]; then
             echo "Found rules.txt: $RULES_PATH"
@@ -83,15 +82,45 @@ jobs:
             echo "HAS_RULES=false" >> $GITHUB_ENV
           fi
 
-      - name: Install Java
+      # ── Java: use GitHub's pre-cached Temurin JDK (~5s vs ~60s for apt-get) ──
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ── zipalign + apksigner: already on the runner via Android SDK ───────────
+      - name: Locate Android build tools
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y openjdk-17-jdk zipalign apksigner wget unzip 2>/dev/null
-          echo "java: $(java -version 2>&1 | head -1)"
+          BUILD_TOOLS=$(ls -d "$ANDROID_HOME/build-tools"/* 2>/dev/null | sort -V | tail -1)
+          if [ -z "$BUILD_TOOLS" ]; then
+            echo "Android build-tools not found — falling back to apt"
+            sudo apt-get install -y -qq zipalign apksigner
+          else
+            echo "Using build-tools: $BUILD_TOOLS"
+            echo "$BUILD_TOOLS" >> $GITHUB_PATH
+          fi
+          java -version
+
+      # ── dpt-shell: cache by release tag so re-downloads only on new versions ──
+      - name: Get dpt-shell latest tag
+        id: dpt_ver
+        run: |
+          TAG=$(curl -s https://api.github.com/repos/luoyesiqiu/dpt-shell/releases/latest \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "dpt-shell latest: $TAG"
+
+      - name: Cache dpt-shell
+        id: cache_dpt
+        uses: actions/cache@v4
+        with:
+          path: dpt-shell-release
+          key: dpt-shell-${{ steps.dpt_ver.outputs.tag }}
 
       - name: Download dpt-shell
+        if: steps.cache_dpt.outputs.cache-hit != 'true'
         run: |
-          # Download the latest dpt-shell release ZIP
           RELEASE_URL=$(curl -s https://api.github.com/repos/luoyesiqiu/dpt-shell/releases/latest \
             | python3 -c "import sys,json; assets=json.load(sys.stdin)['assets']; print(next(a['browser_download_url'] for a in assets if a['name'].endswith('.zip')))")
           echo "Downloading dpt-shell from: $RELEASE_URL"
@@ -100,9 +129,8 @@ jobs:
           echo "=== dpt-shell release contents ==="
           find dpt-shell-release/ -type f | head -30
 
-          # Find dpt.jar and its parent directory.
-          # dpt.jar requires shell-files/ to be in its working directory,
-          # so we MUST run the jar from the folder it lives in.
+      - name: Locate dpt.jar
+        run: |
           DPT_JAR=$(find dpt-shell-release/ -name "dpt.jar" | head -1)
           if [ -z "$DPT_JAR" ]; then
             echo "ERROR: dpt.jar not found in release ZIP"
@@ -112,7 +140,6 @@ jobs:
           echo "Found dpt.jar at: $DPT_JAR  (dir: $DPT_DIR)"
           echo "DPT_DIR=$DPT_DIR" >> $GITHUB_ENV
 
-          # Verify shell-files/ is present next to the jar
           if [ ! -d "$DPT_DIR/shell-files" ]; then
             echo "WARNING: shell-files/ not found next to dpt.jar — listing dir:"
             ls -la "$DPT_DIR/"
@@ -120,8 +147,6 @@ jobs:
             echo "shell-files/ found OK"
             ls "$DPT_DIR/shell-files/" | head -10
           fi
-
-          # Smoke-test the jar from its own directory
           (cd "$DPT_DIR" && java -jar dpt.jar -v)
 
       - name: Run DPT Shell protection
@@ -134,14 +159,12 @@ jobs:
           cp "$WS/$APK_PATH" "$INPUT_APK"
           mkdir -p "$OUTPUT_DIR"
 
-          # Build the command arguments (all paths must be absolute)
           EXTRA_ARGS=""
           if [ "$HAS_RULES" = "true" ]; then
             cp "$WS/$RULES_PATH" "$WS/rules.txt"
             EXTRA_ARGS="-r $WS/rules.txt"
           fi
 
-          # cd into DPT_DIR so shell-files/ is found as a sibling of dpt.jar
           echo "Running dpt.jar from: $DPT_DIR"
           echo "Command: java -jar dpt.jar -f $INPUT_APK -o $OUTPUT_DIR -e x86,x86_64 -x $EXTRA_ARGS"
           (cd "$DPT_DIR" && java -jar dpt.jar \
@@ -158,14 +181,12 @@ jobs:
           echo "=== dpt_output contents ==="
           find dpt_output/ -type f | sort
 
-          # Find the protected APK — dpt-shell places it in the output dir
           OUT_APK=$(find dpt_output/ -name "*.apk" -type f | head -1)
           if [ -z "$OUT_APK" ]; then
             echo "ERROR: No protected APK found in dpt_output/"
             exit 1
           fi
           echo "Protected APK: $OUT_APK ($(wc -c < "$OUT_APK") bytes)"
-          # Normalise filename to out.apk for consistent artifact handling
           cp "$OUT_APK" dpt_output/out.apk
           echo "OUT_APK=dpt_output/out.apk" >> $GITHUB_ENV
 
