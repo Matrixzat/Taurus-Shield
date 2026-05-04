@@ -29,14 +29,14 @@ jobs:
           echo "release_id=$RELEASE_ID" >> $GITHUB_OUTPUT
           echo "Using release ID: $RELEASE_ID"
 
-      - name: Download game APK
+      - name: Download input file
         run: |
           curl -L \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/octet-stream" \
             "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
-            -o game.apk
-          echo "APK size: $(du -sh game.apk)"
+            -o input.bin
+          echo "Downloaded: $(du -sh input.bin)"
 
       - name: Extract IL2CPP files
         run: |
@@ -45,27 +45,48 @@ jobs:
 
           os.makedirs("il2cpp", exist_ok=True)
 
-          with zipfile.ZipFile("game.apk") as z:
+          with zipfile.ZipFile("input.bin") as z:
               names = z.namelist()
+              print(f"Entries in upload: {len(names)}")
+              for n in names[:10]:
+                  print(f"  {n}")
 
-              il2cpp_candidates = [n for n in names if "libil2cpp.so" in n]
-              il2cpp_candidates.sort(key=lambda x: (0 if "arm64" in x else 1))
-              meta_candidates   = [n for n in names if "global-metadata.dat" in n]
+              # ── Detect slim zip (app pre-extracted libil2cpp.so + metadata at root) ──
+              # Slim zip has libil2cpp.so directly at root (no lib/ prefix)
+              slim_so   = "libil2cpp.so"   if "libil2cpp.so"       in names else None
+              slim_meta = "global-metadata.dat" if "global-metadata.dat" in names else None
 
-              if not il2cpp_candidates:
-                  print("ERROR: libil2cpp.so not found — not a Unity IL2CPP game")
-                  sys.exit(1)
-              if not meta_candidates:
-                  print("ERROR: global-metadata.dat not found — IL2CPP metadata missing")
-                  sys.exit(1)
+              if slim_so and slim_meta:
+                  print("Format: SLIM ZIP (pre-extracted by Taurus Shield app)")
+                  for src, dst in [(slim_so, "il2cpp/libil2cpp.so"),
+                                   (slim_meta, "il2cpp/global-metadata.dat")]:
+                      data = z.read(src)
+                      with open(dst, "wb") as f: f.write(data)
+                      print(f"  {src} → {dst}  ({len(data)//1024} KB)")
+              else:
+                  # ── Full APK — find nested files ──────────────────────────────────────
+                  print("Format: FULL APK — scanning for IL2CPP files…")
+                  il2cpp_candidates = [n for n in names if "libil2cpp.so" in n]
+                  il2cpp_candidates.sort(key=lambda x: (0 if "arm64" in x else 1))
+                  meta_candidates   = [n for n in names if "global-metadata.dat" in n]
 
-              for src, dst in [(il2cpp_candidates[0], "il2cpp/libil2cpp.so"),
-                               (meta_candidates[0],   "il2cpp/global-metadata.dat")]:
-                  data = z.read(src)
-                  with open(dst, "wb") as f: f.write(data)
-                  print(f"Extracted {src} → {dst} ({len(data)//1024} KB)")
+                  if not il2cpp_candidates:
+                      print("ERROR: libil2cpp.so not found — not a Unity IL2CPP game")
+                      sys.exit(1)
+                  if not meta_candidates:
+                      print("ERROR: global-metadata.dat not found — IL2CPP metadata missing")
+                      sys.exit(1)
+
+                  for src, dst in [(il2cpp_candidates[0], "il2cpp/libil2cpp.so"),
+                                   (meta_candidates[0],   "il2cpp/global-metadata.dat")]:
+                      data = z.read(src)
+                      with open(dst, "wb") as f: f.write(data)
+                      print(f"  {src} → {dst}  ({len(data)//1024} KB)")
 
           print("Extraction complete")
+          for f in os.listdir("il2cpp"):
+              sz = os.path.getsize(f"il2cpp/{f}")
+              print(f"  il2cpp/{f}  {sz//1024} KB")
           EOF
 
       - name: Install .NET
@@ -75,8 +96,6 @@ jobs:
 
       - name: Download Il2CppDumper
         run: |
-          # Use AndnixSH fork — .NET 8 self-contained Linux binary (runs on ubuntu-latest 2026)
-          # Perfare's official net6/net7 builds are EOL and not available on current runners
           LATEST=$(curl -s https://api.github.com/repos/AndnixSH/Il2CppDumper/releases/latest \
             | python3 -c "import sys,json; assets=[a['browser_download_url'] for a in json.load(sys.stdin)['assets'] if 'linux-x64' in a['name']]; print(assets[0])")
           echo "Downloading: $LATEST"
@@ -89,7 +108,6 @@ jobs:
       - name: Run Il2CppDumper
         run: |
           mkdir -p dump_out
-          # Self-contained binary — no dotnet needed
           EXE=$(find Il2CppDumper -maxdepth 1 -type f -name "Il2CppDumper" | head -1)
           if [ -z "$EXE" ]; then
             EXE=$(find Il2CppDumper -maxdepth 1 -type f ! -name "*.dll" ! -name "*.so" ! -name "*.json" | head -1)
@@ -97,7 +115,6 @@ jobs:
           echo "Running: $EXE"
           chmod +x "$EXE"
           "$EXE" il2cpp/libil2cpp.so il2cpp/global-metadata.dat dump_out/ 2>&1 | tee dumper_output.txt || true
-          echo "=== dumper output above ==="
           echo "=== dump_out contents ==="
           ls -la dump_out/ 2>/dev/null || echo "(empty)"
 
@@ -106,7 +123,6 @@ jobs:
           python3 - <<'EOF'
           import re, json, os, sys
 
-          # Show dumper log for debugging
           if os.path.exists("dumper_output.txt"):
               with open("dumper_output.txt") as f:
                   out = f.read().strip()
@@ -123,7 +139,6 @@ jobs:
                   with open("offsets.json", "w") as f: json.dump(data, f, indent=2)
                   sys.exit(0)
 
-              # List whatever IS in dump_out for diagnosis
               out_files = os.listdir("dump_out") if os.path.isdir("dump_out") else []
               print(f"dump_out contains: {out_files}")
               dumper_log = open("dumper_output.txt").read() if os.path.exists("dumper_output.txt") else "no log"
@@ -135,31 +150,26 @@ jobs:
               }
               with open("offsets.json", "w") as f: json.dump(error_json, f, indent=2)
               print("Wrote error offsets.json — workflow will continue and upload diagnostic JSON")
-              sys.exit(0)  # don't fail — let upload step run so worker can return the error
+              sys.exit(0)
 
-          # Il2CppDumper v6.7+ format: // RVA: 0x... Offset: 0x... VA: 0x...
-          # (one line before the method signature)
           methods = []
           current_class = ""
           pending = None
 
           with open(dump_file, encoding="utf-8", errors="replace") as f:
               for line in f:
-                  # Track current class/struct/interface name
                   cm = re.match(
                       r'^\s*(?:public |private |protected |internal |sealed |abstract )*'
                       r'(?:class|struct|interface)\s+(\w+)', line)
                   if cm:
                       current_class = cm.group(1)
 
-                  # Match RVA/Offset annotation line
                   mm = re.search(
                       r'//\s*RVA:\s*(0x[0-9A-Fa-f]+)\s+Offset:\s*(0x[0-9A-Fa-f]+)', line)
                   if mm:
                       pending = {"rva": mm.group(1), "offset": mm.group(2), "class": current_class}
                       continue
 
-                  # Method signature on the line immediately after the annotation
                   if pending is not None:
                       sig = re.search(
                           r'(\w[\w\s\*<>\[\],\.]+)\s+(\w+)\s*\(([^)]*)\)', line)
@@ -217,7 +227,6 @@ jobs:
             --data-binary @offsets.json \
             | python3 -c "import sys,json; d=json.load(sys.stdin); print('Uploaded — asset_id:', d.get('id','error'))"
 
-          # Upload dump.cs too if present
           if [ -f dump_out/dump.cs ]; then
             curl -s -L -X POST \
               -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
@@ -226,12 +235,12 @@ jobs:
               --data-binary @dump_out/dump.cs | python3 -c "import sys,json; d=json.load(sys.stdin); print('dump.cs asset_id:', d.get('id','?'))"
           fi
 
-      - name: Delete input APK asset
+      - name: Delete input asset
         run: |
           curl -s -L -X DELETE \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}"
-          echo "Input APK deleted"
+          echo "Input asset deleted"
 
       - name: Summary
         run: |
