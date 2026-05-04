@@ -213,7 +213,7 @@ jobs:
           retention-days: 7
 
       - name: Delete input asset
-        if: always()
+        if: success() || failure()
         run: |
           curl -s -L -X DELETE \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
