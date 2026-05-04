@@ -333,8 +333,8 @@ jobs:
           result = {
               "total_methods": len(methods),
               "interesting_methods": top,
-              "game_class_methods": game_classes[:300],
-              "all_methods": methods[:3000]
+              "game_class_methods": game_classes,
+              "all_methods": methods
           }
           with open("offsets.json","w") as f: json.dump(result, f, indent=2)
           print(f"offsets.json: {len(top)} interesting / {len(methods)} total methods")
