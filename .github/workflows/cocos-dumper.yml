@@ -32,7 +32,7 @@ jobs:
 
       - name: Run Cocos2d-x full analyser
         env:
-          PYTHONPATH: android/app/src/main/python
+          PYTHONPATH: ${{ github.workspace }}/android/app/src/main/python
         run: |
           python3 - <<'PYEOF'
           import sys, json, os, zipfile
