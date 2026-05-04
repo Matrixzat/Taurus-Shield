@@ -114,26 +114,10 @@ jobs:
       - name: Download Il2CppDumper
         if: steps.cache_dumper.outputs.cache-hit != 'true'
         run: |
-          LATEST=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/AndnixSH/Il2CppDumper/releases/latest \
-            | python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-    assets = [a['browser_download_url'] for a in d.get('assets', []) if 'linux-x64' in a['name']]
-    print(assets[0] if assets else '')
-except Exception:
-    print('')
-" 2>/dev/null || true)
-
-          if [ -z "$LATEST" ]; then
-            TAG="${{ steps.il2cpp_ver.outputs.tag }}"
-            LATEST="https://github.com/AndnixSH/Il2CppDumper/releases/download/${TAG}/Il2CppDumper-net8-linux-x64-${TAG}.zip"
-            echo "API unavailable — using direct URL: $LATEST"
-          fi
-
-          echo "Downloading: $LATEST"
-          curl -L "$LATEST" -o Il2CppDumper.zip
+          TAG="${{ steps.il2cpp_ver.outputs.tag }}"
+          URL="https://github.com/AndnixSH/Il2CppDumper/releases/download/${TAG}/Il2CppDumper-net8-linux-x64-${TAG}.zip"
+          echo "Downloading: $URL"
+          curl -L "$URL" -o Il2CppDumper.zip
           unzip -q Il2CppDumper.zip -d Il2CppDumper
           chmod +x Il2CppDumper/Il2CppDumper 2>/dev/null || chmod +x Il2CppDumper/* 2>/dev/null || true
           echo "=== Cached files ==="
