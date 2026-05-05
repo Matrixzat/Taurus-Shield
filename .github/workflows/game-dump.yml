@@ -134,7 +134,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: Il2CppDumperPatched
-          key: il2cppdumper-patched-v32-v42-${{ steps.il2cpp_ver.outputs.tag }}
+          key: il2cppdumper-patched-v32v42-ver3-${{ steps.il2cpp_ver.outputs.tag }}
 
       - name: Build patched Il2CppDumper (v32-v42)
         if: steps.run_dumper.outputs.needs_patch == 'true' && steps.cache_patched.outputs.cache-hit != 'true'
