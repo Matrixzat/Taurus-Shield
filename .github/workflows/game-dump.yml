@@ -62,7 +62,6 @@ jobs:
               print(f"  il2cpp/{f}  {os.path.getsize('il2cpp/'+f)//1024} KB")
           EOF
 
-      # ── Detect metadata version ──────────────────────────────────────────
       - name: Detect metadata version
         id: meta
         run: |
@@ -72,7 +71,6 @@ jobs:
               raw = f.read(8)
           magic   = struct.unpack("<I", raw[:4])[0]
           version = struct.unpack("<i", raw[4:8])[0]
-          # Both 0xFAB11BFA (older Unity) and 0xFAB11BAF (Unity 2022+) are valid
           VALID = {0xFAB11BFA, 0xFAB11BAF}
           print(f"Magic: 0x{magic:08X} ({'OK' if magic in VALID else 'WARNING: unknown magic'})")
           print(f"Metadata version: {version}")
@@ -89,17 +87,13 @@ jobs:
           dotnet-version: '8.0.x'
 
       # ════════════════════════════════════════════════════════════════════
-      # PRIMARY: Il2CppDumper — metadata v16 / v19–v24 / v27 / v29 / v31
+      # PRIMARY: Il2CppDumper release (supports v16–v31)
       # ════════════════════════════════════════════════════════════════════
       - name: Get Il2CppDumper version
         id: il2cpp_ver
         run: |
           TAG=$(curl -s https://api.github.com/repos/AndnixSH/Il2CppDumper/releases/latest \
             | python3 -c "import sys,json; print(json.load(sys.stdin).get('tag_name',''))" 2>/dev/null || true)
-          if [ -z "$TAG" ]; then
-            TAG=$(curl -s "https://api.github.com/repos/AndnixSH/Il2CppDumper/releases?per_page=5" \
-              | python3 -c "import sys,json; r=[x for x in json.load(sys.stdin) if x.get('tag_name')]; print(r[0]['tag_name'] if r else '')" 2>/dev/null || true)
-          fi
           [ -z "$TAG" ] && TAG="v6.7.46"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "Il2CppDumper: $TAG"
@@ -120,7 +114,6 @@ jobs:
           curl -L "$LATEST" -o Il2CppDumper.zip
           unzip -q Il2CppDumper.zip -d Il2CppDumper
           chmod +x Il2CppDumper/Il2CppDumper 2>/dev/null || chmod +x Il2CppDumper/* 2>/dev/null || true
-          ls -la Il2CppDumper/
 
       - name: Ensure Il2CppDumper is executable
         run: chmod +x Il2CppDumper/Il2CppDumper 2>/dev/null || chmod +x Il2CppDumper/* 2>/dev/null || true
@@ -133,77 +126,89 @@ jobs:
           [ -z "$EXE" ] && EXE=$(find Il2CppDumper -maxdepth 1 -type f ! -name "*.dll" ! -name "*.so" ! -name "*.json" | head -1)
           echo "Running: $EXE"
           "$EXE" il2cpp/libil2cpp.so il2cpp/global-metadata.dat dump_out/ 2>&1 | tee dumper_output.txt || true
-          if grep -q "not a supported version" dumper_output.txt; then
+          if grep -qE "not a supported version" dumper_output.txt; then
             VER=$(grep -oP 'not a supported version\[\K[^\]]+' dumper_output.txt | head -1)
-            echo "Il2CppDumper: unsupported metadata v${VER} — switching to Cpp2IL"
-            echo "needs_cpp2il=true"  >> $GITHUB_OUTPUT
+            echo "Il2CppDumper: unsupported metadata version [${VER}] — will build patched version"
+            echo "needs_patch=true"  >> $GITHUB_OUTPUT
           else
-            echo "needs_cpp2il=false" >> $GITHUB_OUTPUT
+            echo "needs_patch=false" >> $GITHUB_OUTPUT
           fi
           ls -la dump_out/ 2>/dev/null || echo "(empty)"
 
       # ════════════════════════════════════════════════════════════════════
-      # FALLBACK: Cpp2IL pre-release.21
-      # Handles v29.2, v39 (Unity 2023.x / Unity 6) and all future versions.
-      # Correct flags: --game-path + --force-binary-path + --force-metadata-path
+      # FALLBACK: Build Il2CppDumper from source with v32–v42 patched in
+      # Handles v39 (Unity 2023.x / Unity 6) and beyond.
       # ════════════════════════════════════════════════════════════════════
-      - name: Restore Cpp2IL cache
-        id: cache_cpp2il
-        if: steps.run_dumper.outputs.needs_cpp2il == 'true'
+      - name: Restore patched Il2CppDumper cache
+        id: cache_patched
+        if: steps.run_dumper.outputs.needs_patch == 'true'
         uses: actions/cache@v4
         with:
-          path: Cpp2IL-bin
-          key: cpp2il-linux-2022.1.0-pre-release.21
+          path: Il2CppDumperPatched
+          key: il2cppdumper-patched-v32-v42-src-${{ steps.il2cpp_ver.outputs.tag }}
 
-      - name: Download Cpp2IL
-        if: steps.run_dumper.outputs.needs_cpp2il == 'true' && steps.cache_cpp2il.outputs.cache-hit != 'true'
+      - name: Build patched Il2CppDumper (v32–v42 support)
+        if: steps.run_dumper.outputs.needs_patch == 'true' && steps.cache_patched.outputs.cache-hit != 'true'
         run: |
-          TAG="2022.1.0-pre-release.21"
-          URL="https://github.com/SamboyCoding/Cpp2IL/releases/download/${TAG}/Cpp2IL-${TAG}-Linux"
-          mkdir -p Cpp2IL-bin
-          curl -L "$URL" -o Cpp2IL-bin/Cpp2IL --progress-bar
-          chmod +x Cpp2IL-bin/Cpp2IL
-          ls -lh Cpp2IL-bin/
+          echo "Cloning Il2CppDumper source..."
+          git clone --depth 1 https://github.com/AndnixSH/Il2CppDumper.git Il2CppDumperSrc
 
-      - name: Run Cpp2IL
-        if: steps.run_dumper.outputs.needs_cpp2il == 'true'
+          echo "Patching Metadata.cs to extend version support to v42..."
+          python3 - <<'PYEOF'
+          import re, glob, os
+
+          for fp in glob.glob('Il2CppDumperSrc/**/*.cs', recursive=True):
+              txt = open(fp, encoding='utf-8', errors='replace').read()
+              if 'not a supported version' not in txt:
+                  continue
+              print(f'Found version check in: {fp}')
+
+              # Strategy 1: Add goto/fall-through cases before the default throw
+              # Replace:  default:\n..throw new InvalidDataException(..."not a supported version"
+              # With:     case 32: case 33: ... case 42: goto case 31;\n default: throw...
+              extra = 'case 32: case 33: case 34: case 35: case 36: case 37: case 38: case 39: case 40: case 41: case 42:\n                    goto case 31;\n                '
+              patched = re.sub(
+                  r'(default:\s*\n\s*throw new[^\n]*not a supported version[^\n]*)',
+                  extra + r'\1',
+                  txt
+              )
+              if patched != txt:
+                  open(fp, 'w', encoding='utf-8').write(patched)
+                  print(f'  Patched with goto case 31')
+                  continue
+
+              # Strategy 2: Simply suppress the throw (replace with Console.WriteLine)
+              patched2 = re.sub(
+                  r'throw new[^\n]*not a supported version[^\n]*',
+                  'Console.Error.WriteLine($"[WARN] metadata version {version} not officially supported — continuing")',
+                  txt
+              )
+              if patched2 != txt:
+                  open(fp, 'w', encoding='utf-8').write(patched2)
+                  print(f'  Patched by suppressing throw')
+          PYEOF
+
+          echo "Building..."
+          CSPROJ=$(find Il2CppDumperSrc -name "Il2CppDumper.csproj" | head -1)
+          dotnet publish "$CSPROJ" \
+            -c Release -r linux-x64 --self-contained true \
+            -o Il2CppDumperPatched/ \
+            -p:PublishSingleFile=true \
+            -p:IncludeAllContentForSelfExtract=true \
+            2>&1 | tail -20
+          chmod +x Il2CppDumperPatched/Il2CppDumper
+          echo "Built: $(ls -lh Il2CppDumperPatched/Il2CppDumper)"
+
+      - name: Run patched Il2CppDumper
+        if: steps.run_dumper.outputs.needs_patch == 'true'
         run: |
-          echo "Running Cpp2IL for metadata v${{ steps.meta.outputs.version }}..."
-          mkdir -p cpp2il_raw dump_out
-
-          # Cpp2IL needs --game-path (even a stub), then override binary/metadata with --force-* flags
-          mkdir -p gpath
-          touch gpath/GameData.exe
-
-          ABSO=$(pwd)/il2cpp/libil2cpp.so
-          ABSM=$(pwd)/il2cpp/global-metadata.dat
-
-          ./Cpp2IL-bin/Cpp2IL \
-            --game-path        gpath \
-            --exe-name         GameData \
-            --force-binary-path   "$ABSO" \
-            --force-metadata-path "$ABSM" \
-            --force-unity-version 2022.3.0 \
-            --use-processor    dumper \
-            --output-to        cpp2il_raw \
-            2>&1 | tee cpp2il_output.txt || true
-
-          cat cpp2il_output.txt >> dumper_output.txt
-
-          echo "=== cpp2il_raw tree ==="
-          find cpp2il_raw -type f 2>/dev/null | head -30 || echo "(empty)"
-
-          # Flatten Cpp2IL output into dump_out/
-          DUMPCS=$(find cpp2il_raw -name "dump.cs" 2>/dev/null | head -1)
-          [ -n "$DUMPCS" ] && cp "$DUMPCS" dump_out/dump.cs && echo "Copied dump.cs from $DUMPCS"
-
-          for fname in ida.py ida_with_struct.py ghidra.py il2cpp.h script.json stringliteral.json; do
-            SRC=$(find cpp2il_raw -name "$fname" 2>/dev/null | head -1)
-            [ -n "$SRC" ] && cp "$SRC" "dump_out/$fname" && echo "Copied $fname"
-          done
-
-          echo "=== dump_out after Cpp2IL ==="
-          ls -la dump_out/
+          mkdir -p dump_out
+          chmod +x Il2CppDumperPatched/Il2CppDumper
+          echo "Running patched Il2CppDumper for metadata v${{ steps.meta.outputs.version }}..."
+          Il2CppDumperPatched/Il2CppDumper il2cpp/libil2cpp.so il2cpp/global-metadata.dat dump_out/ \
+            2>&1 | tee -a dumper_output.txt || true
+          echo "=== dump_out ==="
+          ls -la dump_out/ 2>/dev/null || echo "(empty)"
 
       # ════════════════════════════════════════════════════════════════════
       # COMMON: recover + parse + upload
@@ -326,9 +331,9 @@ jobs:
       - name: Summary
         run: |
           META="${{ steps.meta.outputs.version }}"
-          CPP="${{ steps.run_dumper.outputs.needs_cpp2il }}"
-          [ "$CPP" = "true" ] \
-            && TOOL="Cpp2IL pre-release.21 (metadata v${META} — Unity 2023+/Unity 6)" \
+          PATCH="${{ steps.run_dumper.outputs.needs_patch }}"
+          [ "$PATCH" = "true" ] \
+            && TOOL="Il2CppDumper (source-patched, v${META} support)" \
             || TOOL="Il2CppDumper ${{ steps.il2cpp_ver.outputs.tag }} (metadata v${META})"
           echo "## Game Dump Complete ✅" >> $GITHUB_STEP_SUMMARY
           echo "- **Job ID:** ${{ inputs.job_id }}" >> $GITHUB_STEP_SUMMARY
