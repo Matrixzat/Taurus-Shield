@@ -35,7 +35,6 @@ jobs:
             "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
             -o input.apk
           echo "Downloaded: $(du -sh input.apk)"
-          file input.apk
 
       - name: Extract package name from APK
         id: pkg
@@ -45,10 +44,7 @@ jobs:
             PKG=$(python3 .github/scripts/extract_pkg.py input.apk 2>/dev/null || true)
           fi
           echo "Package name: [$PKG]"
-          if [ -z "$PKG" ]; then
-            echo "ERROR: Could not determine package name"
-            exit 1
-          fi
+          if [ -z "$PKG" ]; then echo "ERROR: Could not determine package name"; exit 1; fi
           echo "package=$PKG" >> "$GITHUB_OUTPUT"
 
       - name: Set up Java 17
@@ -76,22 +72,19 @@ jobs:
         run: |
           VER="${{ steps.frida-ver.outputs.version }}"
           curl -fL "https://github.com/frida/frida/releases/download/${VER}/frida-server-${VER}-android-x86_64.xz" -o frida-server.xz
-          xz -d frida-server.xz
-          mv frida-server frida-server-bin
-          chmod +x frida-server-bin
-          echo "Frida server downloaded and ready"
+          xz -d frida-server.xz && mv frida-server frida-server-bin && chmod +x frida-server-bin
 
       - name: Ensure frida-server is executable
         run: chmod +x frida-server-bin
 
-      - name: Cache pip frida-tools
+      - name: Cache pip packages
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: pip-frida-tools-${{ steps.frida-ver.outputs.version }}-${{ runner.os }}
+          key: pip-frida-${{ steps.frida-ver.outputs.version }}-${{ runner.os }}
 
-      - name: Install Frida Python tools (host)
-        run: pip install "frida-tools~=14.0" "frida==${{ steps.frida-ver.outputs.version }}"
+      - name: Install Frida tools + frida-dexdump
+        run: pip install "frida==${{ steps.frida-ver.outputs.version }}" frida-tools frida-dexdump
 
       - name: Cache Android AVD
         id: avd-cache
@@ -154,7 +147,7 @@ jobs:
           curl -s -X DELETE \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" || true
-          echo "Asset cleaned up"
+          echo "APK asset cleaned up"
 
       - name: Summary
         if: always()
@@ -163,5 +156,5 @@ jobs:
           echo "## DEX Dump - ${{ steps.pkg.outputs.package }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Job ID:** ${{ inputs.job_id }}" >> $GITHUB_STEP_SUMMARY
           echo "- **DEX files dumped:** $DEX_COUNT" >> $GITHUB_STEP_SUMMARY
-          echo "- **Method:** Frida attach + ClassLinker::DefineClass hook" >> $GITHUB_STEP_SUMMARY
+          echo "- **Method:** frida-dexdump (spawn + memory scan) + ClassLinker fallback" >> $GITHUB_STEP_SUMMARY
           echo "- **Artifact:** dex-dump-${{ inputs.job_id }} (3-day retention)" >> $GITHUB_STEP_SUMMARY
