@@ -46,18 +46,30 @@ jobs:
 
       - name: Set up Android NDK
         run: |
-          NDK_VERSION="r27c"
-          curl -L "https://dl.google.com/android/repository/android-ndk-${NDK_VERSION}-linux.zip" -o ndk.zip
-          unzip -q ndk.zip
-          echo "NDK_ROOT=$(pwd)/android-ndk-${NDK_VERSION}" >> $GITHUB_ENV
-          echo "NDK ready: android-ndk-${NDK_VERSION}"
+          # Use the NDK pre-installed on ubuntu-latest runners — no 633 MB download needed.
+          # Prefer NDK 27 (closest to r27c), fall back to whatever is available.
+          NDK_ROOT=$(ls -d /usr/local/lib/android/sdk/ndk/27* 2>/dev/null | sort -V | tail -1)
+          if [ -z "$NDK_ROOT" ]; then
+            NDK_ROOT=$(ls -d /usr/local/lib/android/sdk/ndk/* 2>/dev/null | sort -V | tail -1)
+          fi
+          if [ -z "$NDK_ROOT" ]; then
+            echo "ERROR: No pre-installed NDK found"
+            ls /usr/local/lib/android/sdk/ || true
+            exit 1
+          fi
+          echo "NDK_ROOT=$NDK_ROOT" >> $GITHUB_ENV
+          echo "Using NDK: $NDK_ROOT"
+          ls "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/" | grep "aarch64.*clang" | head -6
 
       - name: Compile libmatrix-hook.so + libmain.so stub (ARM64)
         run: |
-          CXX="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++"
-          CC="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
+          LLVM="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CXX="$LLVM/aarch64-linux-android24-clang++"
+          CC="$LLVM/aarch64-linux-android24-clang"
           SYSROOT="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
           BASE_FLAGS="--sysroot=$SYSROOT -target aarch64-linux-android24 -shared -fPIC -O2 -fvisibility=hidden -Wl,--strip-all"
+
+          echo "Toolchain: $($CXX --version | head -1)"
 
           echo "── Compiling libmatrix-hook.so ──"
           $CXX $BASE_FLAGS -std=c++17 -static-libstdc++ \
@@ -66,7 +78,7 @@ jobs:
           echo "  size: $(du -sh libmatrix-hook.so)"
           file libmatrix-hook.so
 
-          echo "── Compiling libmain.so stub (pure C — no C++ runtime needed) ──"
+          echo "── Compiling libmain.so stub (pure C) ──"
           $CC $BASE_FLAGS \
             -o libmain_stub.so mod_menu/subway/loader_stub.c \
             -llog -ldl
@@ -140,8 +152,8 @@ jobs:
           echo "## Subway Surfers — matrix-hook Injected" >> $GITHUB_STEP_SUMMARY
           echo "| File | Role |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| libmatrix-hook.so | Our hook — 21 runtime patches |" >> $GITHUB_STEP_SUMMARY
-          echo "| libmain.so | Tiny C stub — loads matrix-hook, forwards JNI_OnLoad |" >> $GITHUB_STEP_SUMMARY
+          echo "| libmatrix-hook.so | Hook — 21 runtime patches via dl_iterate_phdr |" >> $GITHUB_STEP_SUMMARY
+          echo "| libmain.so | C stub — finds matrix-hook via dladdr, forwards JNI_OnLoad |" >> $GITHUB_STEP_SUMMARY
           echo "| libmain_orig.so | Original Unity libmain (untouched) |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Download artifact -> MT Manager -> sign -> install" >> $GITHUB_STEP_SUMMARY
