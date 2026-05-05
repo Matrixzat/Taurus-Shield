@@ -188,6 +188,9 @@ jobs:
               <Nullable>enable</Nullable>
               <ImplicitUsings>enable</ImplicitUsings>
             </PropertyGroup>
+            <ItemGroup>
+              <PackageReference Include="System.Reflection.MetadataLoadContext" Version="8.0.0" />
+            </ItemGroup>
           </Project>
           PROJ
             cat > /tmp/extractor/Program.cs << 'CSHARP'
