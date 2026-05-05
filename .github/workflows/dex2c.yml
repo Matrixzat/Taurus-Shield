@@ -102,7 +102,7 @@ jobs:
           path: |
             ~/dex2c
             ~/.cache/pip
-          key: dex2c-codehasan-v1
+          key: dex2c-codehasan-v2
 
       - name: Clone dex2c
         if: steps.dex2c-cache.outputs.cache-hit != 'true'
