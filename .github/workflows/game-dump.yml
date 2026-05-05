@@ -127,63 +127,166 @@ jobs:
           fi
           ls -la dump_out/ 2>/dev/null || echo "(empty)"
 
-      # ── FALLBACK: Build Il2CppDumper from source with v32-v42 patched in ─
-      - name: Restore patched Il2CppDumper cache
-        id: cache_patched
+      # ── FALLBACK: Cpp2IL for v32+ metadata (generates DummyDlls with [Address] attrs) ──
+      - name: Restore Cpp2IL cache
+        id: cache_cpp2il
         if: steps.run_dumper.outputs.needs_patch == 'true'
         uses: actions/cache@v4
         with:
-          path: Il2CppDumperPatched
-          key: il2cppdumper-patched-v32v42-ver5-${{ steps.il2cpp_ver.outputs.tag }}
+          path: Cpp2IL-bin
+          key: cpp2il-2022.1.0-pre21-linux-v1
 
-      - name: Build patched Il2CppDumper (v32-v42)
-        if: steps.run_dumper.outputs.needs_patch == 'true' && steps.cache_patched.outputs.cache-hit != 'true'
+      - name: Download Cpp2IL
+        if: steps.run_dumper.outputs.needs_patch == 'true' && steps.cache_cpp2il.outputs.cache-hit != 'true'
         run: |
-          git clone --depth 1 https://github.com/AndnixSH/Il2CppDumper.git Il2CppDumperSrc
+          mkdir -p Cpp2IL-bin
+          curl -sL \
+            "https://github.com/SamboyCoding/Cpp2IL/releases/download/2022.1.0-pre-release.21/Cpp2IL-2022.1.0-pre-release.21-Linux" \
+            -o Cpp2IL-bin/Cpp2IL
+          chmod +x Cpp2IL-bin/Cpp2IL
+          echo "Cpp2IL downloaded: $(du -sh Cpp2IL-bin/Cpp2IL)"
 
-          # Patches: 1) version check >31->42  2) GroupBy to fix duplicate-key crashes in v39
-          python3 -c "
-          import glob
-          for fp in glob.glob('Il2CppDumperSrc/**/*.cs', recursive=True):
-              src = open(fp, encoding='utf-8', errors='replace').read()
-              changed = False
-              if 'version > 31' in src:
-                  src = src.replace('version > 31', 'version > 42', 1)
-                  print('Patched version range in', fp)
-                  changed = True
-              if 'fieldDefaultValues.ToDictionary' in src:
-                  src = src.replace(
-                      'fieldDefaultValuesDic = fieldDefaultValues.ToDictionary(x => x.fieldIndex);',
-                      'try { fieldDefaultValuesDic = fieldDefaultValues.ToDictionary(x => x.fieldIndex); } catch { fieldDefaultValuesDic = fieldDefaultValues.GroupBy(x => x.fieldIndex).ToDictionary(g => g.Key, g => g.Last()); }')
-                  print('Patched fieldDefaultValuesDic in', fp)
-                  changed = True
-              if 'parameterDefaultValues.ToDictionary' in src:
-                  src = src.replace(
-                      'parameterDefaultValuesDic = parameterDefaultValues.ToDictionary(x => x.parameterIndex);',
-                      'try { parameterDefaultValuesDic = parameterDefaultValues.ToDictionary(x => x.parameterIndex); } catch { parameterDefaultValuesDic = parameterDefaultValues.GroupBy(x => x.parameterIndex).ToDictionary(g => g.Key, g => g.Last()); }')
-                  print('Patched parameterDefaultValuesDic in', fp)
-                  changed = True
-              if changed:
-                  open(fp, 'w', encoding='utf-8').write(src)
-          "
-
-          CSPROJ=$(find Il2CppDumperSrc -name "Il2CppDumper.csproj" | head -1)
-          dotnet publish "$CSPROJ" \
-            -f net8.0 -c Release -r linux-x64 --self-contained true \
-            -o Il2CppDumperPatched/ \
-            -p:PublishSingleFile=true \
-            2>&1 | tail -15
-          chmod +x Il2CppDumperPatched/Il2CppDumper
-          ls -lh Il2CppDumperPatched/Il2CppDumper
-
-      - name: Run patched Il2CppDumper
+      - name: Run Cpp2IL (v32+ fallback)
         if: steps.run_dumper.outputs.needs_patch == 'true'
         run: |
-          chmod +x Il2CppDumperPatched/Il2CppDumper
-          echo "Running patched Il2CppDumper (metadata v${{ steps.meta.outputs.version }})..."
-          Il2CppDumperPatched/Il2CppDumper il2cpp/libil2cpp.so il2cpp/global-metadata.dat dump_out/ \
-            2>&1 | tee -a dumper_output.txt || true
-          ls -la dump_out/ 2>/dev/null || echo "(empty)"
+          chmod +x Cpp2IL-bin/Cpp2IL
+          mkdir -p cpp2il_out gpath/GameData_Data/Managed
+          echo "=== Cpp2IL help ==="
+          timeout 10 Cpp2IL-bin/Cpp2IL --help 2>&1 | head -40 || true
+          echo ""
+          echo "Running Cpp2IL for metadata v${{ steps.meta.outputs.version }}..."
+          timeout 600 Cpp2IL-bin/Cpp2IL \
+            --game-path gpath \
+            --exe-name GameData \
+            --force-binary-path "$(pwd)/il2cpp/libil2cpp.so" \
+            --force-metadata-path "$(pwd)/il2cpp/global-metadata.dat" \
+            --force-unity-version 2022.3.0 \
+            --output-to cpp2il_out \
+            2>&1 | tee cpp2il_log.txt || true
+          echo "=== Cpp2IL output files ==="
+          find cpp2il_out -type f | head -30 || echo "(empty)"
+          echo "=== Cpp2IL log tail ==="
+          tail -60 cpp2il_log.txt
+
+      - name: Extract addresses from Cpp2IL DummyDlls
+        if: steps.run_dumper.outputs.needs_patch == 'true'
+        run: |
+          DLLS=$(find cpp2il_out -name "*.dll" 2>/dev/null | wc -l)
+          echo "DummyDlls found: $DLLS"
+          mkdir -p dump_out
+
+          if [ "$DLLS" -gt 0 ]; then
+            echo "Building inline C# address extractor..."
+            mkdir -p /tmp/extractor
+            cat > /tmp/extractor/extractor.csproj << 'PROJ'
+          <Project Sdk="Microsoft.NET.Sdk">
+            <PropertyGroup>
+              <OutputType>Exe</OutputType>
+              <TargetFramework>net8.0</TargetFramework>
+              <Nullable>enable</Nullable>
+              <ImplicitUsings>enable</ImplicitUsings>
+            </PropertyGroup>
+          </Project>
+          PROJ
+            cat > /tmp/extractor/Program.cs << 'CSHARP'
+          using System.Reflection;
+          using System.Text.Json;
+          using System.Text.Json.Serialization;
+
+          var dllDir = args[0];
+          var outFile = args[1];
+          var results = new List<MethodEntry>();
+          var dllPaths = Directory.GetFiles(dllDir, "*.dll", SearchOption.AllDirectories);
+          var runtimeDlls = Directory.GetFiles(Path.GetDirectoryName(typeof(object).Assembly.Location)!, "*.dll");
+          var resolver = new PathAssemblyResolver(dllPaths.Concat(runtimeDlls));
+
+          foreach (var dll in dllPaths)
+          {
+              try {
+                  using var mlc = new MetadataLoadContext(resolver);
+                  var asm = mlc.LoadFromAssemblyPath(dll);
+                  foreach (var type in asm.GetTypes())
+                  {
+                      var typeName = type.FullName ?? type.Name;
+                      foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
+                                                              BindingFlags.Instance | BindingFlags.Static |
+                                                              BindingFlags.DeclaredOnly))
+                      {
+                          foreach (var attr in method.CustomAttributes)
+                          {
+                              if (attr.AttributeType.Name != "AddressAttribute") continue;
+                              var rva    = attr.NamedArguments.FirstOrDefault(n => n.MemberName == "RVA").TypedValue.Value?.ToString() ?? "";
+                              var offset = attr.NamedArguments.FirstOrDefault(n => n.MemberName == "Offset").TypedValue.Value?.ToString() ?? "";
+                              if (string.IsNullOrEmpty(rva)) continue;
+                              long addr = 0;
+                              try { addr = Convert.ToInt64(rva, 16); } catch { }
+                              results.Add(new MethodEntry {
+                                  Name   = $"{typeName}::{method.Name}",
+                                  Address = addr,
+                                  Rva    = rva,
+                                  Offset = offset,
+                                  Class  = typeName,
+                                  Method = method.Name,
+                              });
+                          }
+                      }
+                  }
+              } catch (Exception ex) {
+                  Console.Error.WriteLine($"Skip {Path.GetFileName(dll)}: {ex.Message}");
+              }
+          }
+
+          Directory.CreateDirectory(Path.GetDirectoryName(outFile)!);
+          File.WriteAllText(outFile, JsonSerializer.Serialize(results,
+              new JsonSerializerOptions { WriteIndented = true }));
+          Console.WriteLine($"Extracted {results.Count} methods with addresses.");
+
+          record MethodEntry {
+              [JsonPropertyName("Name")]    public string Name    { get; init; } = "";
+              [JsonPropertyName("Address")] public long   Address { get; init; }
+              [JsonPropertyName("rva")]     public string Rva     { get; init; } = "";
+              [JsonPropertyName("offset")]  public string Offset  { get; init; } = "";
+              [JsonPropertyName("class")]   public string Class   { get; init; } = "";
+              [JsonPropertyName("method")]  public string Method  { get; init; } = "";
+          }
+          CSHARP
+
+            dotnet run --project /tmp/extractor --configuration Release -- \
+              "$(pwd)/cpp2il_out" "$(pwd)/dump_out/script.json" 2>&1 | tee extract_log.txt || true
+            METHODS=$(python3 -c "import json; print(len(json.load(open('dump_out/script.json'))))" 2>/dev/null || echo "0")
+            echo "Methods extracted: $METHODS"
+          else
+            echo "No DummyDlls — Cpp2IL likely failed to parse v${{ steps.meta.outputs.version }} metadata."
+            echo "Cpp2IL log:"
+            cat cpp2il_log.txt || true
+          fi
+
+          # Generate dump.cs from script.json (handles both Il2CppDumper and Cpp2IL formats)
+          python3 - << 'EOF'
+          import json, os
+          sj = "dump_out/script.json"
+          if not os.path.exists(sj):
+              print("No script.json — nothing to generate dump.cs from"); exit(0)
+          data = json.load(open(sj))
+          if not data:
+              print("Empty script.json"); exit(0)
+          by_class = {}
+          for e in data:
+              cls = e.get("class") or e.get("Class") or "Unknown"
+              by_class.setdefault(cls, []).append(e)
+          lines = ["// Generated from Cpp2IL DummyDlls\n"]
+          for cls in sorted(by_class):
+              short = cls.split(".")[-1]
+              lines.append(f"\n// Namespace: {'.'.join(cls.split('.')[:-1]) or 'global'}\npublic class {short}  // {cls}\n{{\n")
+              for m in by_class[cls]:
+                  rva    = m.get("rva") or m.get("Rva") or "0x0"
+                  offset = m.get("offset") or m.get("Offset") or "0x0"
+                  method = m.get("method") or m.get("Method") or "???"
+                  lines.append(f"    // RVA: {rva} Offset: {offset}\n    public void {method}();\n")
+              lines.append("}\n")
+          with open("dump_out/dump.cs", "w") as f: f.writelines(lines)
+          print(f"Generated dump.cs: {len(data)} methods across {len(by_class)} classes")
+          EOF
 
       # ── COMMON: recover + parse + upload ───────────────────────────────
       - name: Recover missing script files from script.json
@@ -242,8 +345,10 @@ jobs:
                   json.dump(data, open("offsets.json","w"), indent=2); sys.exit(0)
               out_files = os.listdir("dump_out") if os.path.isdir("dump_out") else []
               log = open("dumper_output.txt").read() if os.path.exists("dumper_output.txt") else "no log"
-              json.dump({"error":"Dumper produced no output","dump_out_files":out_files,
-                         "dumper_log":log[-2000:],"total_methods":0,"interesting_methods":[],"all_methods":[]},
+              cpp2il_log = open("cpp2il_log.txt").read() if os.path.exists("cpp2il_log.txt") else ""
+              json.dump({"error":"No dump produced","dump_out_files":out_files,
+                         "dumper_log":log[-2000:],"cpp2il_log":cpp2il_log[-2000:],
+                         "total_methods":0,"interesting_methods":[],"all_methods":[]},
                         open("offsets.json","w"), indent=2)
               print("Wrote error offsets.json"); sys.exit(0)
           methods, current_class, pending = [], "", None
@@ -283,6 +388,7 @@ jobs:
           path: |
             dump_out/**
             offsets.json
+            cpp2il_log.txt
             !dump_out/DummyDlls/**
           retention-days: 7
 
@@ -298,7 +404,7 @@ jobs:
           META="${{ steps.meta.outputs.version }}"
           PATCH="${{ steps.run_dumper.outputs.needs_patch }}"
           [ "$PATCH" = "true" ] \
-            && TOOL="Il2CppDumper (source-patched v32-v42, metadata v${META})" \
+            && TOOL="Cpp2IL 2022.1.0-pre21 (metadata v${META})" \
             || TOOL="Il2CppDumper ${{ steps.il2cpp_ver.outputs.tag }} (metadata v${META})"
           echo "## Game Dump Complete" >> $GITHUB_STEP_SUMMARY
           echo "- **Job ID:** ${{ inputs.job_id }}" >> $GITHUB_STEP_SUMMARY
