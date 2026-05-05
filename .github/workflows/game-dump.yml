@@ -366,15 +366,26 @@ jobs:
           print(f"offsets.json: {len(top)} interesting / {len(methods)} total methods")
           EOF
 
+      - name: Flatten output files for artifact
+        run: |
+          for f in dump.cs script.json il2cpp.h stringliteral.json ida.py ida_with_struct.py ghidra.py; do
+            [ -f "dump_out/$f" ] && cp "dump_out/$f" "$f" && echo "Copied $f" || echo "Not found: $f (skipped)"
+          done
+
       - name: Upload results artifact
         uses: actions/upload-artifact@v4
         with:
           name: game-dump-${{ inputs.job_id }}
           path: |
-            dump_out/**
             offsets.json
+            dump.cs
+            script.json
+            il2cpp.h
+            stringliteral.json
+            ida.py
+            ida_with_struct.py
+            ghidra.py
             cpp2il_log.txt
-            !dump_out/DummyDlls/**
           retention-days: 7
 
       - name: Delete input asset
@@ -394,4 +405,4 @@ jobs:
           echo "- **Tool:** $TOOL" >> $GITHUB_STEP_SUMMARY
           echo "- **Artifact:** game-dump-${{ inputs.job_id }} (7-day retention)" >> $GITHUB_STEP_SUMMARY
           [ -f offsets.json ] && echo "- **offsets.json:** $(du -sh offsets.json | cut -f1)" >> $GITHUB_STEP_SUMMARY || true
-          echo "- **Files:** $(ls dump_out/ 2>/dev/null | tr '\n' ' ' || echo empty)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Files:** $(ls dump.cs script.json il2cpp.h stringliteral.json ida.py ida_with_struct.py ghidra.py 2>/dev/null | tr '\n' ' ' || echo empty)" >> $GITHUB_STEP_SUMMARY
