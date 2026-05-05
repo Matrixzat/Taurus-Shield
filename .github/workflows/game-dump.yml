@@ -163,7 +163,8 @@ jobs:
             --force-metadata-path "$(pwd)/il2cpp/global-metadata.dat" \
             --force-unity-version 2022.3.0 \
             --output-to cpp2il_out \
-            --output-as dummydll,diffable-cs \
+            --output-as dummydll \
+            --output-as diffable-cs \
             2>&1 | tee cpp2il_log.txt || true
           echo "=== Cpp2IL output files ==="
           find cpp2il_out -type f | head -30 || echo "(empty)"
