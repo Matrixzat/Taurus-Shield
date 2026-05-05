@@ -44,7 +44,7 @@ public class ModMenu {
         0, 1, 2, 3, 4, 5, 6, 7
     };
 
-    private static FrameLayout  gPanel;
+    private static LinearLayout gPanel;
     private static boolean      gPanelVisible = false;
 
     // ── Entry point (called from native via JNI on UI thread) ──────────────────
