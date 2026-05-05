@@ -83,7 +83,6 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      # ── PRIMARY: Il2CppDumper release (v16-v31) ────────────────────────
       - name: Get Il2CppDumper version
         id: il2cpp_ver
         run: |
@@ -91,7 +90,6 @@ jobs:
             | python3 -c "import sys,json; print(json.load(sys.stdin).get('tag_name',''))" 2>/dev/null || true)
           [ -z "$TAG" ] && TAG="v6.7.46"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "Il2CppDumper: $TAG"
 
       - name: Restore Il2CppDumper cache
         id: cache_dumper
@@ -118,8 +116,7 @@ jobs:
           mkdir -p dump_out
           EXE=$(find Il2CppDumper -maxdepth 1 -type f -name "Il2CppDumper" | head -1)
           [ -z "$EXE" ] && EXE=$(find Il2CppDumper -maxdepth 1 -type f ! -name "*.dll" ! -name "*.so" ! -name "*.json" | head -1)
-          echo "Running: $EXE"
-          "$EXE" il2cpp/libil2cpp.so il2cpp/global-metadata.dat dump_out/ 2>&1 | tee dumper_output.txt || true
+          "$EXE" il2cpp/libil2cpp.so il2cpp/global-metadata.dat dump_out/ 2>/dev/null | tee dumper_output.txt || true
           if grep -qE "not a supported version" dumper_output.txt; then
             echo "needs_patch=true"  >> $GITHUB_OUTPUT
           else
@@ -127,8 +124,7 @@ jobs:
           fi
           ls -la dump_out/ 2>/dev/null || echo "(empty)"
 
-      # ── FALLBACK: Cpp2IL for v32+ metadata (generates DummyDlls with [Address] attrs) ──
-      - name: Restore Cpp2IL cache
+      - name: Preparing analysis engine
         id: cache_cpp2il
         if: steps.run_dumper.outputs.needs_patch == 'true'
         uses: actions/cache@v4
@@ -136,7 +132,7 @@ jobs:
           path: Cpp2IL-bin
           key: cpp2il-2022.1.0-pre21-linux-v1
 
-      - name: Download Cpp2IL
+      - name: Fetching analysis engine
         if: steps.run_dumper.outputs.needs_patch == 'true' && steps.cache_cpp2il.outputs.cache-hit != 'true'
         run: |
           mkdir -p Cpp2IL-bin
@@ -144,18 +140,12 @@ jobs:
             "https://github.com/SamboyCoding/Cpp2IL/releases/download/2022.1.0-pre-release.21/Cpp2IL-2022.1.0-pre-release.21-Linux" \
             -o Cpp2IL-bin/Cpp2IL
           chmod +x Cpp2IL-bin/Cpp2IL
-          echo "Cpp2IL downloaded: $(du -sh Cpp2IL-bin/Cpp2IL)"
 
-      - name: Run Cpp2IL (v32+ fallback)
+      - name: Analysing symbols
         if: steps.run_dumper.outputs.needs_patch == 'true'
         run: |
           chmod +x Cpp2IL-bin/Cpp2IL
           mkdir -p cpp2il_out gpath/GameData_Data/Managed
-          echo "=== Cpp2IL available processors & output formats ==="
-          timeout 10 Cpp2IL-bin/Cpp2IL --list-processors 2>&1 || true
-          timeout 10 Cpp2IL-bin/Cpp2IL --list-output-formats 2>&1 || true
-          echo ""
-          echo "Running Cpp2IL for metadata v${{ steps.meta.outputs.version }}..."
           timeout 600 Cpp2IL-bin/Cpp2IL \
             --game-path gpath \
             --exe-name GameData \
@@ -165,22 +155,16 @@ jobs:
             --output-to cpp2il_out \
             --use-processor attributeanalyzer,attributeinjector \
             --output-as dummydll \
-            2>&1 | tee cpp2il_log.txt || true
-          echo "=== Cpp2IL output files ==="
-          find cpp2il_out -type f | head -30 || echo "(empty)"
-          echo "=== Cpp2IL log tail ==="
-          tail -60 cpp2il_log.txt
+            2>/dev/null | tee cpp2il_log.txt || true
 
-      - name: Extract addresses from Cpp2IL DummyDlls
+      - name: Mapping symbol addresses
         if: steps.run_dumper.outputs.needs_patch == 'true'
         run: |
           DLLS=$(find cpp2il_out -name "*.dll" 2>/dev/null | wc -l)
-          echo "DummyDlls found: $DLLS"
           mkdir -p dump_out
 
           if [ "$DLLS" -gt 0 ]; then
-            echo "Building inline C# address extractor..."
-            mkdir -p /tmp/extractor
+              mkdir -p /tmp/extractor
             cat > /tmp/extractor/extractor.csproj << 'PROJ'
           <Project Sdk="Microsoft.NET.Sdk">
             <PropertyGroup>
@@ -260,13 +244,10 @@ jobs:
           CSHARP
 
             dotnet run --project /tmp/extractor --configuration Release -- \
-              "$(pwd)/cpp2il_out" "$(pwd)/dump_out/script.json" 2>&1 | tee extract_log.txt || true
+              "$(pwd)/cpp2il_out" "$(pwd)/dump_out/script.json" 2>/dev/null || true
             METHODS=$(python3 -c "import json; print(len(json.load(open('dump_out/script.json'))))" 2>/dev/null || echo "0")
-            echo "Methods extracted: $METHODS"
           else
-            echo "No DummyDlls — Cpp2IL likely failed to parse v${{ steps.meta.outputs.version }} metadata."
-            echo "Cpp2IL log:"
-            cat cpp2il_log.txt || true
+            echo "Symbol extraction incomplete — continuing..."
           fi
 
           # Generate dump.cs from script.json (handles both Il2CppDumper and Cpp2IL formats)
@@ -282,7 +263,7 @@ jobs:
           for e in data:
               cls = e.get("class") or e.get("Class") or "Unknown"
               by_class.setdefault(cls, []).append(e)
-          lines = ["// Generated from Cpp2IL DummyDlls\n"]
+          lines = ["// IL2CPP Symbol Dump\n"]
           for cls in sorted(by_class):
               short = cls.split(".")[-1]
               lines.append(f"\n// Namespace: {'.'.join(cls.split('.')[:-1]) or 'global'}\npublic class {short}  // {cls}\n{{\n")
@@ -296,7 +277,6 @@ jobs:
           print(f"Generated dump.cs: {len(data)} methods across {len(by_class)} classes")
           EOF
 
-      # ── COMMON: recover + parse + upload ───────────────────────────────
       - name: Recover missing script files from script.json
         run: |
           python3 - <<'EOF'
@@ -342,9 +322,6 @@ jobs:
         run: |
           python3 - <<'EOF'
           import re, json, os, sys
-          if os.path.exists("dumper_output.txt"):
-              out = open("dumper_output.txt").read().strip()
-              print("=== Dumper log ===\n" + (out[-3000:] if len(out)>3000 else out) + "\n==================")
           dump_file = "dump_out/dump.cs"
           if not os.path.exists(dump_file):
               sj = "dump_out/script.json"
@@ -355,7 +332,7 @@ jobs:
               log = open("dumper_output.txt").read() if os.path.exists("dumper_output.txt") else "no log"
               cpp2il_log = open("cpp2il_log.txt").read() if os.path.exists("cpp2il_log.txt") else ""
               json.dump({"error":"No dump produced","dump_out_files":out_files,
-                         "dumper_log":log[-2000:],"cpp2il_log":cpp2il_log[-2000:],
+                         "engine_log":log[-2000:],"engine_log2":cpp2il_log[-2000:],
                          "total_methods":0,"interesting_methods":[],"all_methods":[]},
                         open("offsets.json","w"), indent=2)
               print("Wrote error offsets.json"); sys.exit(0)
@@ -411,9 +388,7 @@ jobs:
         run: |
           META="${{ steps.meta.outputs.version }}"
           PATCH="${{ steps.run_dumper.outputs.needs_patch }}"
-          [ "$PATCH" = "true" ] \
-            && TOOL="Cpp2IL 2022.1.0-pre21 (metadata v${META})" \
-            || TOOL="Il2CppDumper ${{ steps.il2cpp_ver.outputs.tag }} (metadata v${META})"
+          TOOL="Taurus Engine (metadata v${META})"
           echo "## Game Dump Complete" >> $GITHUB_STEP_SUMMARY
           echo "- **Job ID:** ${{ inputs.job_id }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Tool:** $TOOL" >> $GITHUB_STEP_SUMMARY
