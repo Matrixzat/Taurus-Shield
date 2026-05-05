@@ -35,8 +35,6 @@ jobs:
           with zipfile.ZipFile("input.bin") as z:
               names = z.namelist()
               print(f"Entries: {len(names)}")
-              for n in names[:10]:
-                  print(f"  {n}")
               slim_so   = "libil2cpp.so"        if "libil2cpp.so"        in names else None
               slim_meta = "global-metadata.dat" if "global-metadata.dat" in names else None
               if slim_so and slim_meta:
@@ -47,19 +45,19 @@ jobs:
                       with open(dst, "wb") as f: f.write(data)
                       print(f"  {src} -> {dst}  ({len(data)//1024} KB)")
               else:
-                  print("Format: FULL APK — scanning…")
+                  print("Format: FULL APK")
                   il2cpp_c = sorted([n for n in names if "libil2cpp.so" in n],
                                     key=lambda x: 0 if "arm64" in x else 1)
                   meta_c   = [n for n in names if "global-metadata.dat" in n]
-                  if not il2cpp_c: print("ERROR: libil2cpp.so not found"); sys.exit(1)
-                  if not meta_c:   print("ERROR: global-metadata.dat not found"); sys.exit(1)
+                  if not il2cpp_c: print("ERROR: no libil2cpp.so"); sys.exit(1)
+                  if not meta_c:   print("ERROR: no global-metadata.dat"); sys.exit(1)
                   for src, dst in [(il2cpp_c[0], "il2cpp/libil2cpp.so"),
                                    (meta_c[0],   "il2cpp/global-metadata.dat")]:
                       data = z.read(src)
                       with open(dst, "wb") as f: f.write(data)
                       print(f"  {src} -> {dst}  ({len(data)//1024} KB)")
-          for f in os.listdir("il2cpp"):
-              print(f"  il2cpp/{f}  {os.path.getsize('il2cpp/'+f)//1024} KB")
+          for fn in os.listdir("il2cpp"):
+              print(f"  il2cpp/{fn}  {os.path.getsize('il2cpp/'+fn)//1024} KB")
           EOF
 
       - name: Detect metadata version
@@ -71,8 +69,7 @@ jobs:
               raw = f.read(8)
           magic   = struct.unpack("<I", raw[:4])[0]
           version = struct.unpack("<i", raw[4:8])[0]
-          VALID = {0xFAB11BFA, 0xFAB11BAF}
-          print(f"Magic: 0x{magic:08X} ({'OK' if magic in VALID else 'WARNING: unknown magic'})")
+          print(f"Magic: 0x{magic:08X}")
           print(f"Metadata version: {version}")
           with open("/tmp/meta_version.txt", "w") as f:
               f.write(str(version))
@@ -86,9 +83,7 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      # ════════════════════════════════════════════════════════════════════
-      # PRIMARY: Il2CppDumper release (supports v16–v31)
-      # ════════════════════════════════════════════════════════════════════
+      # ── PRIMARY: Il2CppDumper release (v16-v31) ────────────────────────
       - name: Get Il2CppDumper version
         id: il2cpp_ver
         run: |
@@ -110,7 +105,6 @@ jobs:
         run: |
           LATEST=$(curl -s https://api.github.com/repos/AndnixSH/Il2CppDumper/releases/latest \
             | python3 -c "import sys,json; assets=[a['browser_download_url'] for a in json.load(sys.stdin)['assets'] if 'linux-x64' in a['name']]; print(assets[0])")
-          echo "Downloading: $LATEST"
           curl -L "$LATEST" -o Il2CppDumper.zip
           unzip -q Il2CppDumper.zip -d Il2CppDumper
           chmod +x Il2CppDumper/Il2CppDumper 2>/dev/null || chmod +x Il2CppDumper/* 2>/dev/null || true
@@ -127,87 +121,69 @@ jobs:
           echo "Running: $EXE"
           "$EXE" il2cpp/libil2cpp.so il2cpp/global-metadata.dat dump_out/ 2>&1 | tee dumper_output.txt || true
           if grep -qE "not a supported version" dumper_output.txt; then
-            VER=$(grep -oP 'not a supported version\[\K[^\]]+' dumper_output.txt | head -1)
-            echo "Il2CppDumper: unsupported metadata version [${VER}] — will build patched version"
             echo "needs_patch=true"  >> $GITHUB_OUTPUT
           else
             echo "needs_patch=false" >> $GITHUB_OUTPUT
           fi
           ls -la dump_out/ 2>/dev/null || echo "(empty)"
 
-      # ════════════════════════════════════════════════════════════════════
-      # FALLBACK: Build Il2CppDumper from source with v32–v42 patched in
-      # Handles v39 (Unity 2023.x / Unity 6) and beyond.
-      # ════════════════════════════════════════════════════════════════════
+      # ── FALLBACK: Build Il2CppDumper from source with v32-v42 patched in ─
       - name: Restore patched Il2CppDumper cache
         id: cache_patched
         if: steps.run_dumper.outputs.needs_patch == 'true'
         uses: actions/cache@v4
         with:
           path: Il2CppDumperPatched
-          key: il2cppdumper-patched-v32-v42-src-${{ steps.il2cpp_ver.outputs.tag }}
+          key: il2cppdumper-patched-v32-v42-${{ steps.il2cpp_ver.outputs.tag }}
 
-      - name: Build patched Il2CppDumper (v32–v42 support)
+      - name: Build patched Il2CppDumper (v32-v42)
         if: steps.run_dumper.outputs.needs_patch == 'true' && steps.cache_patched.outputs.cache-hit != 'true'
         run: |
-          echo "Cloning Il2CppDumper source..."
           git clone --depth 1 https://github.com/AndnixSH/Il2CppDumper.git Il2CppDumperSrc
 
-          echo "Patching Metadata.cs to extend version support to v42..."
-          python3 - <<'PYEOF'
-          import re, glob
+          # Patch: add case 32..42 after case 31 using plain string replace
+          python3 -c "
+          import glob, os
           for fp in glob.glob('Il2CppDumperSrc/**/*.cs', recursive=True):
-              txt = open(fp, encoding='utf-8', errors='replace').read()
-              if 'not a supported version' not in txt:
+              src = open(fp, encoding='utf-8', errors='replace').read()
+              if 'not a supported version' not in src:
                   continue
-              print(f'Found version check in: {fp}')
-              # Insert case 32..42 labels right after "case 31:" so they share the same handler
-              patched = re.sub(r'(case 31:)', r'
-                case 32: case 33: case 34: case 35: case 36: case 37: case 38: case 39: case 40: case 41: case 42:', txt, count=1)
-              if patched == txt:
-                  # Last-resort: neutralise the throw by replacing with a no-op statement
-                  patched = re.sub(r'throw new \w+\([^)]*not a supported version[^)]*\);', '/* version accepted */ break;', txt)
-              if patched != txt:
-                  open(fp, 'w', encoding='utf-8').write(patched)
-                  print('  Patch applied')
+              print('Patching:', fp)
+              NEW_CASES = 'case 31:\n                case 32: case 33: case 34: case 35: case 36: case 37: case 38: case 39: case 40: case 41: case 42:'
+              patched = src.replace('case 31:', NEW_CASES, 1)
+              if patched == src:
+                  print('  WARNING: case 31 not found, skipping')
               else:
-                  print('  WARNING: patch did not match - dumping context')
-                  idx = txt.find('not a supported version')
-                  print(repr(txt[max(0,idx-200):idx+200]))
-          PYEOF
+                  open(fp, 'w', encoding='utf-8').write(patched)
+                  print('  Patched OK')
+          "
 
-          echo "Building..."
           CSPROJ=$(find Il2CppDumperSrc -name "Il2CppDumper.csproj" | head -1)
           dotnet publish "$CSPROJ" \
             -f net8.0 -c Release -r linux-x64 --self-contained true \
             -o Il2CppDumperPatched/ \
             -p:PublishSingleFile=true \
-            -p:IncludeAllContentForSelfExtract=true \
-            2>&1 | tail -20
+            2>&1 | tail -15
           chmod +x Il2CppDumperPatched/Il2CppDumper
-          echo "Built: $(ls -lh Il2CppDumperPatched/Il2CppDumper)"
+          ls -lh Il2CppDumperPatched/Il2CppDumper
 
       - name: Run patched Il2CppDumper
         if: steps.run_dumper.outputs.needs_patch == 'true'
         run: |
-          mkdir -p dump_out
           chmod +x Il2CppDumperPatched/Il2CppDumper
-          echo "Running patched Il2CppDumper for metadata v${{ steps.meta.outputs.version }}..."
+          echo "Running patched Il2CppDumper (metadata v${{ steps.meta.outputs.version }})..."
           Il2CppDumperPatched/Il2CppDumper il2cpp/libil2cpp.so il2cpp/global-metadata.dat dump_out/ \
             2>&1 | tee -a dumper_output.txt || true
-          echo "=== dump_out ==="
           ls -la dump_out/ 2>/dev/null || echo "(empty)"
 
-      # ════════════════════════════════════════════════════════════════════
-      # COMMON: recover + parse + upload
-      # ════════════════════════════════════════════════════════════════════
+      # ── COMMON: recover + parse + upload ───────────────────────────────
       - name: Recover missing script files from script.json
         run: |
-          python3 - <<'PYEOF'
+          python3 - <<'EOF'
           import json, os
           sj = "dump_out/script.json"
           if not os.path.exists(sj):
-              print("script.json not found — nothing to recover"); exit(0)
+              print("script.json not found"); exit(0)
           with open(sj, encoding="utf-8") as f:
               raw = json.load(f)
           entries = [e for e in (raw if isinstance(raw, list) else []) if isinstance(e, dict)]
@@ -232,26 +208,23 @@ jobs:
               with open(f"dump_out/{fname}", "w", encoding="utf-8") as f: f.writelines(lines)
               print(f"Generated {fname}")
           if not os.path.exists("dump_out/ghidra.py"):
-              hdr = _hdr("Il2CppDumper/ghidra.py") if os.path.exists("Il2CppDumper/ghidra.py") else "# Ghidra\ndef run(): pass\n\n"
-              lines = [hdr, "METHOD_DICT = {\n"]
+              lines = ["# Ghidra\ndef run(): pass\n\n", "METHOD_DICT = {\n"]
               for e in entries:
                   addr, name = _get(e)
                   if addr and name:
                       lines.append(f"    {addr}: '{name.replace(chr(39), chr(92)+chr(39))}',\n")
               lines.append("}\nrun()\n")
               with open("dump_out/ghidra.py","w",encoding="utf-8") as f: f.writelines(lines)
-              print(f"Generated ghidra.py")
-          for fn in sorted(os.listdir("dump_out")):
-              print(f"  {fn}  {os.path.getsize('dump_out/'+fn)//1024} KB")
-          PYEOF
+              print("Generated ghidra.py")
+          EOF
 
-      - name: Parse dump → offsets.json
+      - name: Parse dump to offsets.json
         run: |
           python3 - <<'EOF'
           import re, json, os, sys
           if os.path.exists("dumper_output.txt"):
               out = open("dumper_output.txt").read().strip()
-              print("=== Dumper log ==="); print(out[-3000:] if len(out)>3000 else out); print("==================")
+              print("=== Dumper log ===\n" + (out[-3000:] if len(out)>3000 else out) + "\n==================")
           dump_file = "dump_out/dump.cs"
           if not os.path.exists(dump_file):
               sj = "dump_out/script.json"
@@ -279,9 +252,8 @@ jobs:
                           methods.append(pending)
                       pending = None
           kw = {"coin":9,"gold":9,"gem":9,"diamond":9,"money":8,"cash":8,"unlock":8,"premium":8,"vip":7,
-                "affor":9,"enough":7,"cost":6,"speed":7,"damage":6,"health":6,"hp":6,"score":7,"point":6,
-                "reward":7,"chest":7,"pickup":6,"cooldown":7,"infinite":10,"unlimited":10,"invincib":10,
-                "revive":8,"cheat":10,"hack":10,"spawn":6,"max":5,"save":4,"load":4,"add":2,"set":2,"get":1}
+                "infinite":10,"unlimited":10,"invincib":10,"revive":8,"cheat":10,"hack":10,
+                "speed":7,"damage":6,"health":6,"hp":6,"score":7,"reward":7,"chest":7,"cooldown":7}
           for m in methods:
               t = (m.get("method","")+" "+m.get("class","")).lower()
               m["interest_score"] = sum(p for k,p in kw.items() if k in t)
@@ -295,17 +267,13 @@ jobs:
           print(f"offsets.json: {len(top)} interesting / {len(methods)} total methods")
           EOF
 
-      - name: Prepare artifact directory
-        run: |
-          cp offsets.json dump_out/offsets.json
-          echo "=== Artifact contents ===" && ls -la dump_out/
-
       - name: Upload results artifact
         uses: actions/upload-artifact@v4
         with:
           name: game-dump-${{ inputs.job_id }}
           path: |
             dump_out/**
+            offsets.json
             !dump_out/DummyDlls/**
           retention-days: 7
 
@@ -321,9 +289,9 @@ jobs:
           META="${{ steps.meta.outputs.version }}"
           PATCH="${{ steps.run_dumper.outputs.needs_patch }}"
           [ "$PATCH" = "true" ] \
-            && TOOL="Il2CppDumper (source-patched, v${META} support)" \
+            && TOOL="Il2CppDumper (source-patched v32-v42, metadata v${META})" \
             || TOOL="Il2CppDumper ${{ steps.il2cpp_ver.outputs.tag }} (metadata v${META})"
-          echo "## Game Dump Complete ✅" >> $GITHUB_STEP_SUMMARY
+          echo "## Game Dump Complete" >> $GITHUB_STEP_SUMMARY
           echo "- **Job ID:** ${{ inputs.job_id }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Tool:** $TOOL" >> $GITHUB_STEP_SUMMARY
           echo "- **Artifact:** game-dump-${{ inputs.job_id }} (7-day retention)" >> $GITHUB_STEP_SUMMARY
