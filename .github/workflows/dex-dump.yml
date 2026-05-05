@@ -1,0 +1,163 @@
+name: DEX Dump (Frida Memory Extract)
+
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: 'Release asset ID of the uploaded APK (from analyze-queue release)'
+        required: true
+      job_id:
+        description: 'Tracking ID — used to name the output artifact'
+        required: true
+
+jobs:
+  dex-dump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Enable KVM for emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Download APK from release
+        run: |
+          curl -fL \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
+            -o input.apk
+          echo "Downloaded: $(du -sh input.apk)"
+          file input.apk
+
+      - name: Extract package name from APK
+        id: pkg
+        run: |
+          sudo apt-get install -y -q aapt 2>/dev/null || true
+          PKG=$(aapt dump badging input.apk 2>/dev/null | grep "^package:" | sed "s/.*name='\([^']*\)'.*/\1/")
+          if [ -z "$PKG" ]; then
+            PKG=$(unzip -p input.apk AndroidManifest.xml | strings | grep -oP 'com\.[a-z0-9._]+' | head -1)
+          fi
+          echo "Package name: $PKG"
+          echo "package=$PKG" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Download Frida server (x86_64 for emulator)
+        run: |
+          FRIDA_VER=$(curl -sf https://api.github.com/repos/frida/frida/releases/latest \
+            | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+          echo "Frida version: $FRIDA_VER"
+          curl -fL \
+            "https://github.com/frida/frida/releases/download/${FRIDA_VER}/frida-server-${FRIDA_VER}-android-x86_64.xz" \
+            -o frida-server.xz
+          xz -d frida-server.xz
+          mv frida-server frida-server-bin
+          chmod +x frida-server-bin
+          echo "frida_ver=$FRIDA_VER" >> "$GITHUB_ENV"
+
+      - name: Install Frida Python tools (host)
+        run: pip install frida-tools
+
+      - name: Run DEX dump inside Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 29
+          target: google_apis
+          arch: x86_64
+          profile: Nexus 6
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: |
+            set -e
+
+            echo "=== Rooting emulator ==="
+            adb root
+            sleep 2
+            adb remount || true
+
+            echo "=== Installing APK ==="
+            adb install -r input.apk
+            echo "APK installed"
+
+            echo "=== Pushing frida-server ==="
+            adb push frida-server-bin /data/local/tmp/frida-server
+            adb shell chmod 755 /data/local/tmp/frida-server
+
+            echo "=== Starting frida-server ==="
+            adb shell "/data/local/tmp/frida-server &" &
+            sleep 4
+
+            echo "=== Pushing dump_dex.js ==="
+            adb push .github/scripts/dump_dex.js /data/local/tmp/dump_dex.js
+
+            PKG="${{ steps.pkg.outputs.package }}"
+            echo "=== Spawning and dumping: $PKG ==="
+
+            # Spawn app with Frida, hook DefineClass, dump DEX — no manual open needed
+            timeout 90 frida \
+              -U \
+              -f "$PKG" \
+              -l .github/scripts/dump_dex.js \
+              --no-pause \
+              2>&1 | tee frida_output.txt || true
+
+            echo "=== Frida output ==="
+            cat frida_output.txt
+
+            echo "=== Pulling dumped DEX files ==="
+            mkdir -p dex_output
+            adb pull "/data/data/$PKG/files/dump_dex_$PKG/" dex_output/ 2>&1 || true
+
+            echo "=== Dump results ==="
+            find dex_output -type f | sort
+            ls -lh dex_output/ 2>/dev/null || echo "No files pulled"
+
+      - name: Package DEX output
+        run: |
+          PKG="${{ steps.pkg.outputs.package }}"
+          JOB="${{ inputs.job_id }}"
+          mkdir -p final_output
+          cp -r dex_output/. final_output/ 2>/dev/null || true
+          cp frida_output.txt final_output/frida_log.txt 2>/dev/null || true
+          echo "Package : $PKG"        > final_output/dump_info.txt
+          echo "Job ID  : $JOB"       >> final_output/dump_info.txt
+          echo "Files   : $(find final_output -name '*.dex' | wc -l) DEX file(s)" >> final_output/dump_info.txt
+          cat final_output/dump_info.txt
+          echo "=== All output files ==="
+          find final_output -type f | sort
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dex-dump-${{ inputs.job_id }}
+          path: final_output/
+          retention-days: 3
+
+      - name: Delete uploaded APK asset
+        if: always()
+        run: |
+          curl -s -X DELETE \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" || true
+          echo "Asset cleaned up"
+
+      - name: Summary
+        run: |
+          DEX_COUNT=$(find final_output -name '*.dex' 2>/dev/null | wc -l)
+          echo "## DEX Dump — ${{ steps.pkg.outputs.package }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Job ID:** ${{ inputs.job_id }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **DEX files dumped:** $DEX_COUNT" >> $GITHUB_STEP_SUMMARY
+          echo "- **Method:** Frida → ClassLinker::DefineClass hook (no manual launch needed)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Artifact:** dex-dump-${{ inputs.job_id }} (3-day retention)" >> $GITHUB_STEP_SUMMARY
