@@ -134,24 +134,37 @@ jobs:
         uses: actions/cache@v4
         with:
           path: Il2CppDumperPatched
-          key: il2cppdumper-patched-v32v42-ver3-${{ steps.il2cpp_ver.outputs.tag }}
+          key: il2cppdumper-patched-v32v42-ver5-${{ steps.il2cpp_ver.outputs.tag }}
 
       - name: Build patched Il2CppDumper (v32-v42)
         if: steps.run_dumper.outputs.needs_patch == 'true' && steps.cache_patched.outputs.cache-hit != 'true'
         run: |
           git clone --depth 1 https://github.com/AndnixSH/Il2CppDumper.git Il2CppDumperSrc
 
-          # Patch: widen version check from >31 to >42 (supports Unity 6 / metadata v39+)
+          # Patches: 1) version check >31->42  2) GroupBy to fix duplicate-key crashes in v39
           python3 -c "
           import glob
           for fp in glob.glob('Il2CppDumperSrc/**/*.cs', recursive=True):
               src = open(fp, encoding='utf-8', errors='replace').read()
-              if 'version > 31' not in src:
-                  continue
-              print('Patching:', fp)
-              patched = src.replace('version > 31', 'version > 42', 1)
-              open(fp, 'w', encoding='utf-8').write(patched)
-              print('  Done')
+              changed = False
+              if 'version > 31' in src:
+                  src = src.replace('version > 31', 'version > 42', 1)
+                  print('Patched version range in', fp)
+                  changed = True
+              if 'fieldDefaultValues.ToDictionary' in src:
+                  src = src.replace(
+                      'fieldDefaultValuesDic = fieldDefaultValues.ToDictionary(x => x.fieldIndex);',
+                      'try { fieldDefaultValuesDic = fieldDefaultValues.ToDictionary(x => x.fieldIndex); } catch { fieldDefaultValuesDic = fieldDefaultValues.GroupBy(x => x.fieldIndex).ToDictionary(g => g.Key, g => g.Last()); }')
+                  print('Patched fieldDefaultValuesDic in', fp)
+                  changed = True
+              if 'parameterDefaultValues.ToDictionary' in src:
+                  src = src.replace(
+                      'parameterDefaultValuesDic = parameterDefaultValues.ToDictionary(x => x.parameterIndex);',
+                      'try { parameterDefaultValuesDic = parameterDefaultValues.ToDictionary(x => x.parameterIndex); } catch { parameterDefaultValuesDic = parameterDefaultValues.GroupBy(x => x.parameterIndex).ToDictionary(g => g.Key, g => g.Last()); }')
+                  print('Patched parameterDefaultValuesDic in', fp)
+                  changed = True
+              if changed:
+                  open(fp, 'w', encoding='utf-8').write(src)
           "
 
           CSPROJ=$(find Il2CppDumperSrc -name "Il2CppDumper.csproj" | head -1)
