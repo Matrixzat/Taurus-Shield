@@ -40,25 +40,51 @@ jobs:
           echo "NDK_ROOT=$NDK_ROOT" >> $GITHUB_ENV
           echo "Using NDK: $NDK_ROOT"
 
-      - name: Build Dobby (ARM64 Android — NDK 27 asm fix)
+      - name: Clone Dobby and fix ARM64 asm for NDK 27 clang
         run: |
           git clone https://github.com/jmpews/Dobby.git --depth=1
 
-          # ── Fix Apple ARM64 asm syntax → GNU/Android (NDK 27 clang) ─────────
-          # NDK 27's integrated assembler doesn't understand @PAGE / @PAGEOFF
-          # (Apple LLVM syntax).  Patch every .asm file in the repo:
-          #   symbol@PAGEOFF  →  :lo12:symbol   (add/ldr low-12 reloc)
-          #   symbol@PAGE     →  symbol          (adrp page reloc; suffix not needed)
-          find Dobby -name "*.asm" -o -name "*.S" | while read f; do
-            # Order matters: fix @PAGEOFF before stripping @PAGE
-            sed -i 's/\([a-zA-Z_][a-zA-Z0-9_]*\)@PAGEOFF/:lo12:\1/g' "$f"
-            sed -i 's/@PAGE//g' "$f"
-          done
-          echo "--- patched asm files ---"
-          grep -rn "@PAGE\|@PAGEOFF\|:lo12:" Dobby/source || true
+          # ── Surgical fix: the only problematic pattern is in closure_bridge_arm64.asm
+          #
+          # Original lines 53-55 (Apple LLVM syntax NDK27 can't assemble):
+          #   adrp TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGE
+          #   add  TMP_REG_0, TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGEOFF
+          #   blr  TMP_REG_0
+          #
+          # Fix: replace with a single bl — linker creates a PLT stub as needed.
+          # bl has ±128 MB range; within a .so this is always safe.
+          ASM="Dobby/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm"
 
-          mkdir -p Dobby/build_arm64
-          cd Dobby/build_arm64
+          python3 - <<'PYEOF2'
+          import re, sys
+          path = "Dobby/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm"
+          src  = open(path).read()
+
+          old = (
+              "adrp TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGE\n"
+              "add TMP_REG_0, TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGEOFF\n"
+              "blr TMP_REG_0"
+          )
+          new = "bl cdecl(common_closure_bridge_handler)"
+
+          if old not in src:
+              print("Pattern not found — scanning for @PAGE variants...")
+              print(repr([l for l in src.splitlines() if "@PAGE" in l]))
+              sys.exit(1)
+
+          patched = src.replace(old, new)
+          open(path, "w").write(patched)
+          print("Patched! Lines 53-55 → single bl instruction.")
+          PYEOF2
+
+          echo "--- result around the fix ---"
+          sed -n '50,60p' "$ASM"
+          echo "--- any remaining @PAGE ---"
+          grep -n "@PAGE" "$ASM" || echo "none"
+
+      - name: Build Dobby (ARM64 Android)
+        run: |
+          mkdir -p Dobby/build_arm64 && cd Dobby/build_arm64
           cmake .. \
             -DCMAKE_TOOLCHAIN_FILE="$NDK_ROOT/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a \
@@ -68,13 +94,13 @@ jobs:
             2>&1 | tail -5
           make -j$(nproc) dobby 2>&1 | tail -10
 
-          # ── Resolve actual .a path (not the directory) ────────────────────────
+          # Resolve the actual .a file path (not the directory)
           DOBBY_A=$(find . -name 'libdobby.a' | head -1)
-          if [ -z "$DOBBY_A" ]; then echo "ERROR: libdobby.a not found"; exit 1; fi
-          DOBBY_A_ABS="$(pwd)/${DOBBY_A#./}"
-          echo "libdobby.a: $(du -sh $DOBBY_A_ABS)"
-          echo "DOBBY_LIB=$DOBBY_A_ABS" >> "$GITHUB_ENV"
-          echo "DOBBY_INC=$(pwd)/../include" >> "$GITHUB_ENV"
+          [ -n "$DOBBY_A" ] || { echo "ERROR: libdobby.a not found after build"; find . -name "*.a"; exit 1; }
+          DOBBY_A_ABS="$(cd "$(dirname "$DOBBY_A")"; pwd)/$(basename "$DOBBY_A")"
+          echo "libdobby.a: $(du -sh "$DOBBY_A_ABS")  →  $DOBBY_A_ABS"
+          echo "DOBBY_LIB=$DOBBY_A_ABS"  >> "$GITHUB_ENV"
+          echo "DOBBY_INC=$(cd ..; pwd)/include" >> "$GITHUB_ENV"
 
       - name: Download ImGui (v1.91.6)
         run: |
@@ -91,7 +117,7 @@ jobs:
           echo "Toolchain : $($CXX --version | head -1)"
           echo "Dobby lib : $DOBBY_LIB"
           echo "Dobby inc : $DOBBY_INC"
-          [ -f "$DOBBY_LIB" ] || { echo "ERROR: DOBBY_LIB is not a file"; exit 1; }
+          [ -f "$DOBBY_LIB" ] || { echo "ERROR: DOBBY_LIB is not a file: $DOBBY_LIB"; exit 1; }
 
           $CXX \
             --sysroot="$SYSROOT" \
@@ -138,21 +164,21 @@ jobs:
 
       - name: Inject into APK
         run: |
-          python3 - <<'PYEOF2'
+          python3 - <<'PYEOF3'
           import os, shutil, zipfile
 
           lib_dir = "apk_work/lib/arm64-v8a"
+          orig    = os.path.join(lib_dir, "libmain.so")
+          bak     = os.path.join(lib_dir, "libmain_orig.so")
 
-          orig = os.path.join(lib_dir, "libmain.so")
-          bak  = os.path.join(lib_dir, "libmain_orig.so")
           if os.path.exists(orig):
               shutil.copy2(orig, bak)
               print(f"Backed up libmain.so ({os.path.getsize(bak):,} bytes)")
 
           shutil.copy2("libmain_stub.so",   orig)
           shutil.copy2("libmatrix-hook.so", os.path.join(lib_dir, "libmatrix-hook.so"))
-          print(f"Stub:  {os.path.getsize(orig):,} bytes")
-          print(f"Hook:  {os.path.getsize(os.path.join(lib_dir,'libmatrix-hook.so')):,} bytes")
+          print(f"Stub : {os.path.getsize(orig):,} bytes")
+          print(f"Hook : {os.path.getsize(os.path.join(lib_dir,'libmatrix-hook.so')):,} bytes")
 
           orig_ct = {}
           with zipfile.ZipFile("game.apk") as z:
@@ -165,21 +191,20 @@ jobs:
                   for fn in sorted(files):
                       fp  = os.path.join(root, fn)
                       arc = os.path.relpath(fp, "apk_work")
-                      ct  = zipfile.ZIP_STORED if arc.endswith(".so") else \
-                            orig_ct.get(arc, zipfile.ZIP_DEFLATED)
+                      ct  = zipfile.ZIP_STORED if arc.endswith(".so") \
+                            else orig_ct.get(arc, zipfile.ZIP_DEFLATED)
                       zout.write(fp, arc, ct)
 
-          sz = os.path.getsize(out)
-          print(f"\nOutput: {out}  ({sz // 1024 // 1024} MB)")
+          print(f"\nOutput: {out}  ({os.path.getsize(out)//1024//1024} MB)")
           with zipfile.ZipFile(out) as vz:
               names = vz.namelist()
               for n in ["lib/arm64-v8a/libmatrix-hook.so",
                         "lib/arm64-v8a/libmain.so",
                         "lib/arm64-v8a/libmain_orig.so"]:
-                  ok    = n in names
-                  kb    = (vz.getinfo(n).file_size // 1024) if ok else 0
+                  ok = n in names
+                  kb = (vz.getinfo(n).file_size // 1024) if ok else 0
                   print(f"  {'OK  ' if ok else 'MISS'} {n}  ({kb} KB)")
-          PYEOF2
+          PYEOF3
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
