@@ -40,48 +40,10 @@ jobs:
       - name: Extract package name from APK
         id: pkg
         run: |
-          # Most reliable: use Android SDK's apkanalyzer (pre-installed on GH runners)
           PKG=$($ANDROID_HOME/cmdline-tools/latest/bin/apkanalyzer manifest application-id input.apk 2>/dev/null || true)
-
-          # Fallback: aapt2 dump packagename
-          if [ -z "$PKG" ] || [[ "$PKG" == *"Error"* ]]; then
-            PKG=$(aapt2 dump packagename input.apk 2>/dev/null || true)
+          if [ -z "$PKG" ] || echo "$PKG" | grep -qi "error"; then
+            PKG=$(python3 .github/scripts/extract_pkg.py input.apk 2>/dev/null || true)
           fi
-
-          # Fallback: aapt dump badging (parse properly)
-          if [ -z "$PKG" ] || [[ "$PKG" == *"Error"* ]]; then
-            sudo apt-get install -y -q aapt 2>/dev/null || true
-            PKG=$(aapt dump badging input.apk 2>/dev/null | grep "^package:" | grep -oP "name='[^']+'" | cut -d"'" -f2)
-          fi
-
-          # Fallback: Python decode binary AndroidManifest.xml
-          if [ -z "$PKG" ]; then
-            PKG=$(python3 - <<'PYEOF'
-import zipfile, struct, re
-
-with zipfile.ZipFile("input.apk") as z:
-    data = z.read("AndroidManifest.xml")
-
-# Binary XML: find package attr — scan for UTF-16LE strings after 0x0001 chunk
-strings = re.findall(b'\x00'.join(b'[\x20-\x7e]' * 3 + [b'[\x20-\x7e]*']) + b'\x00', data)
-decoded = []
-i = 0
-while i < len(data) - 4:
-    if data[i:i+2] == b'\x1c\x00':  # string pool chunk
-        break
-    i += 1
-
-# Simpler: extract all null-separated ASCII strings >= 4 chars
-chunks = data.split(b'\x00')
-words = [c.decode('latin-1') for c in chunks if 3 < len(c) < 100 and all(32 <= b < 127 for b in c)]
-for w in words:
-    if re.match(r'^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*){2,}$', w) and not w.startswith('android.') and not w.startswith('com.android.'):
-        print(w)
-        break
-PYEOF
-            )
-          fi
-
           echo "Package name: [$PKG]"
           if [ -z "$PKG" ]; then
             echo "ERROR: Could not determine package name"
@@ -97,15 +59,13 @@ PYEOF
 
       - name: Download Frida server (x86_64 for emulator)
         run: |
-          FRIDA_VER=$(curl -sf https://api.github.com/repos/frida/frida/releases/latest \
-            | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+          FRIDA_VER=$(curl -sf https://api.github.com/repos/frida/frida/releases/latest | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
           echo "Frida version: $FRIDA_VER"
-          curl -fL \
-            "https://github.com/frida/frida/releases/download/${FRIDA_VER}/frida-server-${FRIDA_VER}-android-x86_64.xz" \
-            -o frida-server.xz
+          curl -fL "https://github.com/frida/frida/releases/download/${FRIDA_VER}/frida-server-${FRIDA_VER}-android-x86_64.xz" -o frida-server.xz
           xz -d frida-server.xz
           mv frida-server frida-server-bin
           chmod +x frida-server-bin
+          echo "frida_ver=$FRIDA_VER" >> "$GITHUB_ENV"
 
       - name: Install Frida Python tools (host)
         run: pip install frida-tools
@@ -119,55 +79,7 @@ PYEOF
           profile: Nexus 6
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          script: |
-            set -e
-            PKG="${{ steps.pkg.outputs.package }}"
-            echo "=== Target package: $PKG ==="
-
-            echo "=== Rooting emulator ==="
-            adb root && sleep 3
-            adb remount || true
-
-            echo "=== Installing APK ==="
-            adb install -r input.apk
-            echo "APK installed ✅"
-
-            echo "=== Pushing frida-server ==="
-            adb push frida-server-bin /data/local/tmp/frida-server
-            adb shell chmod 755 /data/local/tmp/frida-server
-
-            echo "=== Starting frida-server ==="
-            adb shell "nohup /data/local/tmp/frida-server > /dev/null 2>&1 &"
-            sleep 5
-
-            echo "=== Verifying frida-server is running ==="
-            adb shell "ps -e | grep frida" || true
-
-            echo "=== Pushing dump_dex.js ==="
-            adb push .github/scripts/dump_dex.js /data/local/tmp/dump_dex.js
-
-            echo "=== Spawning $PKG with Frida — DEX hook active ==="
-            timeout 120 frida \
-              -U \
-              -f "$PKG" \
-              -l .github/scripts/dump_dex.js \
-              --no-pause \
-              2>&1 | tee frida_output.txt || true
-
-            echo ""
-            echo "=== Frida output ==="
-            cat frida_output.txt
-
-            echo ""
-            echo "=== Pulling dumped DEX files ==="
-            mkdir -p dex_output
-            adb pull "/data/data/$PKG/files/dump_dex_$PKG/" dex_output/ 2>&1 || \
-            adb pull "/data/data/$PKG/files/" dex_output/ 2>&1 || true
-
-            echo ""
-            echo "=== Dump results ==="
-            find dex_output -type f -name "*.dex" | sort
-            ls -lh dex_output/ 2>/dev/null || echo "No files pulled"
+          script: bash .github/scripts/run_dump.sh "${{ steps.pkg.outputs.package }}"
 
       - name: Package DEX output
         if: always()
@@ -175,16 +87,11 @@ PYEOF
           PKG="${{ steps.pkg.outputs.package }}"
           JOB="${{ inputs.job_id }}"
           mkdir -p final_output
-          find dex_output -type f 2>/dev/null | xargs -I{} cp {} final_output/ 2>/dev/null || true
+          find dex_output -type f 2>/dev/null | while read f; do cp "$f" final_output/; done
           cp frida_output.txt final_output/frida_log.txt 2>/dev/null || true
           DEX_COUNT=$(find final_output -name '*.dex' 2>/dev/null | wc -l)
-          {
-            echo "Package : $PKG"
-            echo "Job ID  : $JOB"
-            echo "DEX files dumped: $DEX_COUNT"
-          } > final_output/dump_info.txt
+          printf "Package : %s\nJob ID  : %s\nDEX files dumped: %s\n" "$PKG" "$JOB" "$DEX_COUNT" > final_output/dump_info.txt
           cat final_output/dump_info.txt
-          echo "=== All output files ==="
           find final_output -type f | sort
 
       - name: Upload artifact
@@ -207,8 +114,8 @@ PYEOF
         if: always()
         run: |
           DEX_COUNT=$(find final_output -name '*.dex' 2>/dev/null | wc -l)
-          echo "## DEX Dump — ${{ steps.pkg.outputs.package }}" >> $GITHUB_STEP_SUMMARY
+          echo "## DEX Dump - ${{ steps.pkg.outputs.package }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Job ID:** ${{ inputs.job_id }}" >> $GITHUB_STEP_SUMMARY
           echo "- **DEX files dumped:** $DEX_COUNT" >> $GITHUB_STEP_SUMMARY
-          echo "- **Method:** Frida → ClassLinker::DefineClass hook (no manual launch needed)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Method:** Frida ClassLinker::DefineClass hook" >> $GITHUB_STEP_SUMMARY
           echo "- **Artifact:** dex-dump-${{ inputs.job_id }} (3-day retention)" >> $GITHUB_STEP_SUMMARY
