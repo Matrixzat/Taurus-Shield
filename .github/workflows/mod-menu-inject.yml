@@ -4,189 +4,160 @@ on:
   workflow_dispatch:
     inputs:
       dropbox_url:
-        description: 'Direct download URL for the APK (Dropbox dl=1 link)'
+        description: 'Direct download URL for the APK'
         required: false
         default: 'https://www.dropbox.com/scl/fi/jddlzuz3q627cr4xusufq/Subway-Surf_3.62.1.apk?rlkey=ilrh3no1ljn36g4uwys7ff0uj&st=qhu5ysmi&dl=1'
-      asset_id:
-        description: 'OR: Release asset ID of an already-uploaded APK (leave blank to use URL)'
-        required: false
-        default: ''
 
 jobs:
   build-and-inject:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     permissions:
       contents: write
 
     steps:
-      - name: Checkout repo (for hook sources)
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Download APK
         run: |
-          if [ -n "${{ inputs.asset_id }}" ]; then
-            curl -L \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/octet-stream" \
-              "https://api.github.com/repos/${{ github.repository }}/releases/assets/${{ inputs.asset_id }}" \
-              -o game.apk
-          else
-            curl -L "${{ inputs.dropbox_url }}" -o game.apk
-          fi
-          echo "APK size: $(du -sh game.apk)"
-          file game.apk
+          curl -L "${{ inputs.dropbox_url }}" -o game.apk
+          echo "APK: $(du -sh game.apk)"
 
       - name: Extract APK
         run: |
           mkdir -p apk_work
           unzip -q game.apk -d apk_work
-          echo "Entries: $(find apk_work -type f | wc -l)"
-          find apk_work/lib -name "*.so" | while read f; do echo "  $(du -sh $f)"; done
+          echo "Files: $(find apk_work -type f | wc -l)"
+          find apk_work/lib -name "*.so" 2>/dev/null | while read f; do echo "  $(du -sh $f)"; done
 
       - name: Set up Android NDK
         run: |
-          # Use pre-installed NDK on ubuntu-latest runners — no large download needed.
           NDK_ROOT=$(ls -d /usr/local/lib/android/sdk/ndk/27* 2>/dev/null | sort -V | tail -1)
           if [ -z "$NDK_ROOT" ]; then
             NDK_ROOT=$(ls -d /usr/local/lib/android/sdk/ndk/* 2>/dev/null | sort -V | tail -1)
           fi
-          if [ -z "$NDK_ROOT" ]; then
-            echo "ERROR: No pre-installed NDK found"
-            ls /usr/local/lib/android/sdk/ || true
-            exit 1
-          fi
           echo "NDK_ROOT=$NDK_ROOT" >> $GITHUB_ENV
           echo "Using NDK: $NDK_ROOT"
 
-      - name: Compile ModMenu.java → modmenu.dex
+      - name: Build Dobby (ARM64 Android)
         run: |
-          SDK_ROOT="/usr/local/lib/android/sdk"
+          git clone https://github.com/jmpews/Dobby.git --depth=1
+          mkdir -p Dobby/build_arm64 && cd Dobby/build_arm64
+          cmake .. \
+            -DCMAKE_TOOLCHAIN_FILE=$NDK_ROOT/build/cmake/android.toolchain.cmake \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-24 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPlugin.Android=ON \
+            2>&1 | tail -5
+          make -j$(nproc) dobby 2>&1 | tail -8
+          find . -name "*.a" | while read f; do echo "  $(du -sh $f)  $f"; done
+          echo "DOBBY_LIB=$(pwd)/$(find . -name 'libdobby.a' | head -1)" >> $GITHUB_ENV
+          echo "DOBBY_INC=$(pwd)/../include" >> $GITHUB_ENV
 
-          # Find android.jar (prefer API 33, fall back to any available)
-          ANDROID_JAR=$(ls $SDK_ROOT/platforms/android-3*/android.jar 2>/dev/null | sort -V | tail -1)
-          if [ -z "$ANDROID_JAR" ]; then
-            ANDROID_JAR=$(ls $SDK_ROOT/platforms/*/android.jar 2>/dev/null | sort -V | tail -1)
-          fi
-          echo "android.jar: $ANDROID_JAR"
+      - name: Download ImGui (v1.91.6)
+        run: |
+          git clone --depth=1 --branch v1.91.6 https://github.com/ocornut/imgui.git
+          echo "ImGui files: $(find imgui -name '*.h' -o -name '*.cpp' | wc -l)"
+          ls imgui/backends/imgui_impl_opengl3*
 
-          # Find d8 (DEX compiler) in build-tools
-          D8=$(ls $SDK_ROOT/build-tools/*/d8 2>/dev/null | sort -V | tail -1)
-          echo "d8: $D8"
-
-          mkdir -p dex_build
-
-          # Compile Java source
-          javac -source 8 -target 8 \
-            -bootclasspath "$ANDROID_JAR" \
-            -classpath "$ANDROID_JAR" \
-            -d dex_build \
-            mod_menu/subway/ModMenu.java
-          echo "javac OK — classes:"
-          find dex_build -name "*.class"
-
-          # Convert to DEX
-          $D8 --output dex_build \
-              --min-api 24 \
-              --lib "$ANDROID_JAR" \
-              dex_build/com/taurus/matrix/ModMenu.class
-          echo "d8 OK — dex files:"
-          ls -lh dex_build/*.dex
-
-          # Rename to modmenu.dex for asset loading
-          mv dex_build/classes.dex modmenu.dex
-          echo "modmenu.dex: $(du -sh modmenu.dex)"
-
-      - name: Compile libmatrix-hook.so + libmain.so stub (ARM64)
+      - name: Compile libmatrix-hook.so (Dobby + ImGui + GLES2)
         run: |
           LLVM="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
           CXX="$LLVM/aarch64-linux-android24-clang++"
-          CC="$LLVM/aarch64-linux-android24-clang"
           SYSROOT="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-          BASE_FLAGS="--sysroot=$SYSROOT -target aarch64-linux-android24 -shared -fPIC -O2 -fvisibility=hidden -Wl,--strip-all"
 
           echo "Toolchain: $($CXX --version | head -1)"
+          echo "Dobby lib: $DOBBY_LIB"
 
-          echo "── Compiling libmatrix-hook.so ──"
-          $CXX $BASE_FLAGS -std=c++17 -static-libstdc++ \
-            -o libmatrix-hook.so mod_menu/subway/hook.cpp \
-            -llog -ldl
-          echo "  size: $(du -sh libmatrix-hook.so)"
+          $CXX \
+            --sysroot=$SYSROOT \
+            -target aarch64-linux-android24 \
+            -shared -fPIC -O2 -fvisibility=hidden \
+            -std=c++17 -static-libstdc++ \
+            -DIMGUI_IMPL_OPENGL_ES2 \
+            -I imgui \
+            -I imgui/backends \
+            -I "$DOBBY_INC" \
+            mod_menu/subway/hook.cpp \
+            imgui/imgui.cpp \
+            imgui/imgui_draw.cpp \
+            imgui/imgui_tables.cpp \
+            imgui/imgui_widgets.cpp \
+            imgui/backends/imgui_impl_opengl3.cpp \
+            "$DOBBY_LIB" \
+            -lEGL -lGLESv2 -landroid -llog -ldl \
+            -Wl,--strip-all \
+            -o libmatrix-hook.so
+
+          echo "Hook size: $(du -sh libmatrix-hook.so)"
           file libmatrix-hook.so
-
-          echo "── Compiling libmain.so stub (pure C) ──"
-          $CC $BASE_FLAGS \
-            -o libmain_stub.so mod_menu/subway/loader_stub.c \
-            -llog -ldl
-          echo "  size: $(du -sh libmain_stub.so)"
-          file libmain_stub.so
-
-          echo "=== NEEDED libs (must NOT include libc++_shared.so) ==="
           readelf -d libmatrix-hook.so | grep NEEDED
-          readelf -d libmain_stub.so   | grep NEEDED
+          nm -D libmatrix-hook.so | grep -v " U " | grep -v "__cxa\|__gnu\|_ZN\|_ZS\|_ZT\|_ZZ" | head -10
 
-      - name: Inject matrix-hook into APK
+      - name: Compile libmain.so stub (pure C)
+        run: |
+          LLVM="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          CC="$LLVM/aarch64-linux-android24-clang"
+          SYSROOT="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+
+          $CC \
+            --sysroot=$SYSROOT \
+            -target aarch64-linux-android24 \
+            -shared -fPIC -O2 -fvisibility=hidden \
+            mod_menu/subway/loader_stub.c \
+            -llog -ldl \
+            -Wl,--strip-all \
+            -o libmain_stub.so
+
+          echo "Stub size: $(du -sh libmain_stub.so)"
+          readelf -d libmain_stub.so | grep NEEDED
+
+      - name: Inject into APK
         run: |
           python3 - <<'PYEOF'
           import os, shutil, zipfile
 
-          lib_dir = "apk_work/lib/arm64-v8a"
-          assets_dir = "apk_work/assets"
-          os.makedirs(assets_dir, exist_ok=True)
+          lib_dir    = "apk_work/lib/arm64-v8a"
 
-          # Backup original libmain.so
-          orig_main = os.path.join(lib_dir, "libmain.so")
-          bak_main  = os.path.join(lib_dir, "libmain_orig.so")
-          if os.path.exists(orig_main):
-              shutil.copy2(orig_main, bak_main)
-              print(f"Backed up:  libmain.so -> libmain_orig.so  ({os.path.getsize(bak_main):,} bytes)")
+          orig = os.path.join(lib_dir, "libmain.so")
+          bak  = os.path.join(lib_dir, "libmain_orig.so")
+          if os.path.exists(orig):
+              shutil.copy2(orig, bak)
+              print(f"Backed up libmain.so ({os.path.getsize(bak):,} bytes)")
 
-          # Place stub as libmain.so
-          shutil.copy2("libmain_stub.so", orig_main)
-          print(f"Stub:       libmain_stub.so -> libmain.so      ({os.path.getsize(orig_main):,} bytes)")
+          shutil.copy2("libmain_stub.so",   orig)
+          shutil.copy2("libmatrix-hook.so", os.path.join(lib_dir, "libmatrix-hook.so"))
+          print(f"Stub:  {os.path.getsize(orig):,} bytes")
+          print(f"Hook:  {os.path.getsize(os.path.join(lib_dir,'libmatrix-hook.so')):,} bytes")
 
-          # Place hook library
-          hook_dst = os.path.join(lib_dir, "libmatrix-hook.so")
-          shutil.copy2("libmatrix-hook.so", hook_dst)
-          print(f"Hook:       libmatrix-hook.so added             ({os.path.getsize(hook_dst):,} bytes)")
-
-          # Place mod menu dex in assets
-          dex_dst = os.path.join(assets_dir, "modmenu.dex")
-          shutil.copy2("modmenu.dex", dex_dst)
-          print(f"DEX:        modmenu.dex -> assets/              ({os.path.getsize(dex_dst):,} bytes)")
-
-          # Preserve original compress types, .so always STORED
-          orig_info = {}
+          orig_ct = {}
           with zipfile.ZipFile("game.apk") as z:
-              for info in z.infolist():
-                  orig_info[info.filename] = info.compress_type
+              for i in z.infolist(): orig_ct[i.filename] = i.compress_type
 
           out = "subway_modded_unsigned.apk"
           with zipfile.ZipFile(out, "w") as zout:
-              for root, dirs, files in os.walk("apk_work"):
-                  for fname in sorted(files):
-                      fp  = os.path.join(root, fname)
+              for root, _, files in os.walk("apk_work"):
+                  for fn in sorted(files):
+                      fp  = os.path.join(root, fn)
                       arc = os.path.relpath(fp, "apk_work")
-                      compress = zipfile.ZIP_STORED if arc.endswith(".so") else orig_info.get(arc, zipfile.ZIP_DEFLATED)
-                      zout.write(fp, arc, compress)
+                      ct  = zipfile.ZIP_STORED if arc.endswith(".so") else orig_ct.get(arc, zipfile.ZIP_DEFLATED)
+                      zout.write(fp, arc, ct)
 
           sz = os.path.getsize(out)
-          print(f"\nOutput: {out}  ({sz // 1024 // 1024} MB)")
-
+          print(f"\nOutput: {out}  ({sz//1024//1024} MB)")
           with zipfile.ZipFile(out) as vz:
               names = vz.namelist()
               for n in ["lib/arm64-v8a/libmatrix-hook.so",
                         "lib/arm64-v8a/libmain.so",
-                        "lib/arm64-v8a/libmain_orig.so",
-                        "assets/modmenu.dex"]:
-                  ok    = n in names
-                  info  = vz.getinfo(n) if ok else None
-                  sz_kb = (info.file_size // 1024) if info else 0
-                  ctype = "STORED" if (info and info.compress_type == 0) else "DEFLATED"
-                  print(f"  {'OK' if ok else 'MISSING'} {n}  ({sz_kb} KB, {ctype})")
+                        "lib/arm64-v8a/libmain_orig.so"]:
+                  ok = n in names
+                  sz_kb = (vz.getinfo(n).file_size//1024) if ok else 0
+                  print(f"  {'OK' if ok else 'MISS'} {n}  ({sz_kb} KB)")
           PYEOF
 
-      - name: Upload unsigned modded APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: subway-modded-unsigned
@@ -195,12 +166,9 @@ jobs:
 
       - name: Summary
         run: |
-          echo "## Subway Surfers — matrix-hook + Mod Menu" >> $GITHUB_STEP_SUMMARY
+          echo "## Subway Surfers — Dobby + ImGui Mod Menu" >> $GITHUB_STEP_SUMMARY
           echo "| File | Role |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| libmatrix-hook.so | Hook — 8 togglable features, mod menu loader |" >> $GITHUB_STEP_SUMMARY
-          echo "| libmain.so | C stub — dladdr path fix + JNI_OnLoad forward |" >> $GITHUB_STEP_SUMMARY
-          echo "| libmain_orig.so | Original Unity libmain (untouched) |" >> $GITHUB_STEP_SUMMARY
-          echo "| assets/modmenu.dex | Floating overlay UI (DexClassLoader) |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Download artifact -> MT Manager -> sign -> install" >> $GITHUB_STEP_SUMMARY
+          echo "| libmatrix-hook.so | Hook — Dobby patches + ImGui GL overlay |" >> $GITHUB_STEP_SUMMARY
+          echo "| libmain.so | C stub — loads matrix-hook via absolute path |" >> $GITHUB_STEP_SUMMARY
+          echo "| libmain_orig.so | Original Unity libmain |" >> $GITHUB_STEP_SUMMARY
