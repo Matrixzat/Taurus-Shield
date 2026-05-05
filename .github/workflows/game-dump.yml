@@ -47,14 +47,12 @@ jobs:
                       with open(dst, "wb") as f: f.write(data)
                       print(f"  {src} -> {dst}  ({len(data)//1024} KB)")
               else:
-                  print("Format: FULL APK — scanning for IL2CPP files…")
-                  il2cpp_c = [n for n in names if "libil2cpp.so" in n]
-                  il2cpp_c.sort(key=lambda x: (0 if "arm64" in x else 1))
+                  print("Format: FULL APK — scanning…")
+                  il2cpp_c = sorted([n for n in names if "libil2cpp.so" in n],
+                                    key=lambda x: 0 if "arm64" in x else 1)
                   meta_c   = [n for n in names if "global-metadata.dat" in n]
-                  if not il2cpp_c:
-                      print("ERROR: libil2cpp.so not found"); sys.exit(1)
-                  if not meta_c:
-                      print("ERROR: global-metadata.dat not found"); sys.exit(1)
+                  if not il2cpp_c: print("ERROR: libil2cpp.so not found"); sys.exit(1)
+                  if not meta_c:   print("ERROR: global-metadata.dat not found"); sys.exit(1)
                   for src, dst in [(il2cpp_c[0], "il2cpp/libil2cpp.so"),
                                    (meta_c[0],   "il2cpp/global-metadata.dat")]:
                       data = z.read(src)
@@ -69,24 +67,17 @@ jobs:
         id: meta
         run: |
           python3 - <<'EOF'
-          import struct, sys
+          import struct
           with open("il2cpp/global-metadata.dat", "rb") as f:
               raw = f.read(8)
           magic   = struct.unpack("<I", raw[:4])[0]
           version = struct.unpack("<i", raw[4:8])[0]
-          # Both 0xFAB11BFA (classic) and 0xFAB11BAF (Unity 2022+) are valid
+          # Both 0xFAB11BFA (older Unity) and 0xFAB11BAF (Unity 2022+) are valid
           VALID = {0xFAB11BFA, 0xFAB11BAF}
-          if magic in VALID:
-              print(f"Magic OK: 0x{magic:08X}")
-          else:
-              print(f"WARNING: Unexpected magic 0x{magic:08X} — proceeding anyway")
+          print(f"Magic: 0x{magic:08X} ({'OK' if magic in VALID else 'WARNING: unknown magic'})")
           print(f"Metadata version: {version}")
           with open("/tmp/meta_version.txt", "w") as f:
               f.write(str(version))
-          # Il2CppDumper handles v16,19-24,27,29,31
-          # Cpp2IL handles everything newer (v29.2, v39 Unity2023/Unity6, etc.)
-          dumper_known = {16, 19, 20, 21, 22, 23, 24, 27, 29, 31}
-          print(f"Needs Cpp2IL: {version not in dumper_known}")
           EOF
           VERSION=$(cat /tmp/meta_version.txt)
           echo "version=$VERSION" >> $GITHUB_OUTPUT
@@ -109,7 +100,7 @@ jobs:
             TAG=$(curl -s "https://api.github.com/repos/AndnixSH/Il2CppDumper/releases?per_page=5" \
               | python3 -c "import sys,json; r=[x for x in json.load(sys.stdin) if x.get('tag_name')]; print(r[0]['tag_name'] if r else '')" 2>/dev/null || true)
           fi
-          [ -z "$TAG" ] && TAG="v6.7.46" && echo "WARNING: Using fallback tag $TAG"
+          [ -z "$TAG" ] && TAG="v6.7.46"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "Il2CppDumper: $TAG"
 
@@ -152,8 +143,9 @@ jobs:
           ls -la dump_out/ 2>/dev/null || echo "(empty)"
 
       # ════════════════════════════════════════════════════════════════════
-      # FALLBACK: Cpp2IL — all versions Il2CppDumper can't handle,
-      #           including v29.2, v39 (Unity 2023.x / Unity 6), and future.
+      # FALLBACK: Cpp2IL pre-release.21
+      # Handles v29.2, v39 (Unity 2023.x / Unity 6) and all future versions.
+      # Correct flags: --game-path + --force-binary-path + --force-metadata-path
       # ════════════════════════════════════════════════════════════════════
       - name: Restore Cpp2IL cache
         id: cache_cpp2il
@@ -178,36 +170,39 @@ jobs:
         run: |
           echo "Running Cpp2IL for metadata v${{ steps.meta.outputs.version }}..."
           mkdir -p cpp2il_raw dump_out
-          # Try direct --il2cpp-bin mode (pre-release.19+)
+
+          # Cpp2IL needs --game-path (even a stub), then override binary/metadata with --force-* flags
+          mkdir -p gpath
+          touch gpath/GameData.exe
+
+          ABSO=$(pwd)/il2cpp/libil2cpp.so
+          ABSM=$(pwd)/il2cpp/global-metadata.dat
+
           ./Cpp2IL-bin/Cpp2IL \
-            --il2cpp-bin il2cpp/libil2cpp.so \
-            --metadata   il2cpp/global-metadata.dat \
-            --output-root cpp2il_raw \
-            --use-processor dumper \
+            --game-path        gpath \
+            --exe-name         GameData \
+            --force-binary-path   "$ABSO" \
+            --force-metadata-path "$ABSM" \
+            --force-unity-version 2022.3.0 \
+            --use-processor    dumper \
+            --output-to        cpp2il_raw \
             2>&1 | tee cpp2il_output.txt || true
-          # Fallback: game-path structure if --il2cpp-bin not recognised
-          if grep -qi "unrecognized\|unknown option\|Required" cpp2il_output.txt && \
-             ! find cpp2il_raw -name "dump.cs" -quit 2>/dev/null; then
-            echo "Retrying with --game-path structure..."
-            mkdir -p gpath/GameData_Data/il2cpp_data/Metadata gpath/GameData_Data/Plugins
-            cp il2cpp/global-metadata.dat gpath/GameData_Data/il2cpp_data/Metadata/
-            cp il2cpp/libil2cpp.so        gpath/GameData_Data/Plugins/
-            touch gpath/GameData.exe
-            ./Cpp2IL-bin/Cpp2IL \
-              --game-path gpath \
-              --exe-name  GameData \
-              --output-root cpp2il_raw \
-              --use-processor dumper \
-              2>&1 | tee -a cpp2il_output.txt || true
-          fi
+
           cat cpp2il_output.txt >> dumper_output.txt
-          # Normalise output — flatten Cpp2IL sub-dirs into dump_out/
+
+          echo "=== cpp2il_raw tree ==="
+          find cpp2il_raw -type f 2>/dev/null | head -30 || echo "(empty)"
+
+          # Flatten Cpp2IL output into dump_out/
           DUMPCS=$(find cpp2il_raw -name "dump.cs" 2>/dev/null | head -1)
-          [ -n "$DUMPCS" ] && cp "$DUMPCS" dump_out/dump.cs && echo "Copied dump.cs"
+          [ -n "$DUMPCS" ] && cp "$DUMPCS" dump_out/dump.cs && echo "Copied dump.cs from $DUMPCS"
+
           for fname in ida.py ida_with_struct.py ghidra.py il2cpp.h script.json stringliteral.json; do
             SRC=$(find cpp2il_raw -name "$fname" 2>/dev/null | head -1)
             [ -n "$SRC" ] && cp "$SRC" "dump_out/$fname" && echo "Copied $fname"
           done
+
+          echo "=== dump_out after Cpp2IL ==="
           ls -la dump_out/
 
       # ════════════════════════════════════════════════════════════════════
@@ -239,17 +234,17 @@ jobs:
               for e in entries:
                   addr, name = _get(e)
                   if addr and name:
-                      lines.append(f"    {addr}: '{name.replace(chr(39),chr(92)+chr(39))}',\n")
+                      lines.append(f"    {addr}: '{name.replace(chr(39), chr(92)+chr(39))}',\n")
               lines.append(f"}}\n{footer}")
               with open(f"dump_out/{fname}", "w", encoding="utf-8") as f: f.writelines(lines)
-              print(f"Generated {fname} ({len(entries)} entries)")
+              print(f"Generated {fname}")
           if not os.path.exists("dump_out/ghidra.py"):
-              hdr = _hdr("Il2CppDumper/ghidra.py") if os.path.exists("Il2CppDumper/ghidra.py") else "# Ghidra\ndef run():\n    for a,n in METHOD_DICT.items(): pass\n\n"
+              hdr = _hdr("Il2CppDumper/ghidra.py") if os.path.exists("Il2CppDumper/ghidra.py") else "# Ghidra\ndef run(): pass\n\n"
               lines = [hdr, "METHOD_DICT = {\n"]
               for e in entries:
                   addr, name = _get(e)
                   if addr and name:
-                      lines.append(f"    {addr}: '{name.replace(chr(39),chr(92)+chr(39))}',\n")
+                      lines.append(f"    {addr}: '{name.replace(chr(39), chr(92)+chr(39))}',\n")
               lines.append("}\nrun()\n")
               with open("dump_out/ghidra.py","w",encoding="utf-8") as f: f.writelines(lines)
               print(f"Generated ghidra.py")
@@ -263,12 +258,12 @@ jobs:
           import re, json, os, sys
           if os.path.exists("dumper_output.txt"):
               out = open("dumper_output.txt").read().strip()
-              print("=== Dumper output ==="); print(out[-3000:] if len(out)>3000 else out); print("=====================")
+              print("=== Dumper log ==="); print(out[-3000:] if len(out)>3000 else out); print("==================")
           dump_file = "dump_out/dump.cs"
           if not os.path.exists(dump_file):
               sj = "dump_out/script.json"
               if os.path.exists(sj):
-                  data = json.load(open(sj)); print(f"Using script.json: {len(data)} entries")
+                  data = json.load(open(sj)); print(f"Fallback: script.json {len(data)} entries")
                   json.dump(data, open("offsets.json","w"), indent=2); sys.exit(0)
               out_files = os.listdir("dump_out") if os.path.isdir("dump_out") else []
               log = open("dumper_output.txt").read() if os.path.exists("dumper_output.txt") else "no log"
