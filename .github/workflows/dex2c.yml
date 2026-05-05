@@ -102,7 +102,9 @@ jobs:
           path: |
             ~/dex2c
             ~/.cache/pip
-          key: dex2c-codehasan-v2
+            ~/.local/lib
+            ~/.local/bin
+          key: dex2c-codehasan-v3
 
       - name: Clone dex2c
         if: steps.dex2c-cache.outputs.cache-hit != 'true'
@@ -112,9 +114,8 @@ jobs:
           ls ~/dex2c/dcc.py
 
       - name: Install Python dependencies
-        if: steps.dex2c-cache.outputs.cache-hit != 'true'
         run: |
-          echo "Cache miss — installing Python deps..."
+          echo "Installing Python deps (cached wheels make this fast)..."
           cd ~/dex2c
           pip3 install -r requirements.txt --break-system-packages
 
