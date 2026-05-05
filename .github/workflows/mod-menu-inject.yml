@@ -40,95 +40,24 @@ jobs:
           echo "NDK_ROOT=$NDK_ROOT" >> $GITHUB_ENV
           echo "Using NDK: $NDK_ROOT"
 
-      - name: Clone Dobby and patch for NDK 27 clang
+      - name: Clone xHook (GOT patcher, pure C)
         run: |
-          git clone https://github.com/jmpews/Dobby.git --depth=1
-
-          python3 - <<'PYEOF2'
-          import sys
-
-          # ── Fix 1: Apple ARM64 asm @PAGE/@PAGEOFF → bl (NDK27 integrated-as) ──────
-          #
-          # closure_bridge_arm64.asm lines 53-55 use Apple LLVM syntax:
-          #   adrp TMP_REG_0, cdecl(...)@PAGE
-          #   add  TMP_REG_0, TMP_REG_0, cdecl(...)@PAGEOFF
-          #   blr  TMP_REG_0
-          #
-          # NDK 27 clang's integrated assembler doesn't understand @PAGE/@PAGEOFF.
-          # Replace with a single `bl` — the linker creates a PLT stub as needed.
-          # Both symbols live in the same .so so the ±128 MB bl range is always met.
-
-          asm_path = "Dobby/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm"
-          src = open(asm_path).read()
-          old = (
-              "adrp TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGE\n"
-              "add TMP_REG_0, TMP_REG_0, cdecl(common_closure_bridge_handler)@PAGEOFF\n"
-              "blr TMP_REG_0"
-          )
-          new = "bl cdecl(common_closure_bridge_handler)"
-          if old not in src:
-              print(f"ERROR: expected asm pattern not found in {asm_path}")
-              print("Nearby lines:", [l for l in src.splitlines() if "@PAGE" in l or "blr TMP" in l])
-              sys.exit(1)
-          open(asm_path, "w").write(src.replace(old, new))
-          print(f"Fix 1 OK — {asm_path}")
-
-          # ── Fix 2: RuntimeModule field renamed load_address → base ───────────────
-          #
-          # Recent Dobby refactor renamed RuntimeModule::load_address to ::base in
-          # source/PlatformUtil/ProcessRuntime.h, but the Linux backend .cc was not
-          # updated.  Replace every occurrence in that file.
-
-          cc_path = "Dobby/source/Backend/UserMode/PlatformUtil/Linux/ProcessRuntime.cc"
-          src2 = open(cc_path).read()
-          if "load_address" not in src2:
-              print(f"Fix 2 skipped — load_address not found in {cc_path} (already fixed?)")
-          else:
-              patched = src2.replace("module.load_address", "module.base")
-              open(cc_path, "w").write(patched)
-              count = src2.count("module.load_address")
-              print(f"Fix 2 OK — replaced {count} occurrence(s) of load_address→base in {cc_path}")
-          PYEOF2
-
-          echo "--- asm result (lines 51-57) ---"
-          sed -n '51,57p' Dobby/source/TrampolineBridge/ClosureTrampolineBridge/arm64/closure_bridge_arm64.asm
-          echo "--- cc result (grep base/load_address) ---"
-          grep -n "load_address\|module\.base" Dobby/source/Backend/UserMode/PlatformUtil/Linux/ProcessRuntime.cc || echo "clean"
-
-      - name: Build Dobby (ARM64 Android)
-        run: |
-          mkdir -p Dobby/build_arm64 && cd Dobby/build_arm64
-          cmake .. \
-            -DCMAKE_TOOLCHAIN_FILE="$NDK_ROOT/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI=arm64-v8a \
-            -DANDROID_PLATFORM=android-24 \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DPlugin.Android=ON \
-            2>&1 | tail -5
-          make -j$(nproc) dobby 2>&1 | tail -10
-
-          DOBBY_A=$(find . -name 'libdobby.a' | head -1)
-          [ -n "$DOBBY_A" ] || { echo "ERROR: libdobby.a not found"; find . -name "*.a"; exit 1; }
-          DOBBY_A_ABS="$(cd "$(dirname "$DOBBY_A")"; pwd)/$(basename "$DOBBY_A")"
-          echo "libdobby.a: $(du -sh "$DOBBY_A_ABS")"
-          echo "DOBBY_LIB=$DOBBY_A_ABS"          >> "$GITHUB_ENV"
-          echo "DOBBY_INC=$(cd ..; pwd)/include" >> "$GITHUB_ENV"
+          git clone --depth=1 https://github.com/iqiyi/xHook.git
+          echo "xHook files:"
+          ls xHook/libxhook/jni/*.c xHook/libxhook/jni/*.h
 
       - name: Download ImGui (v1.91.6)
         run: |
           git clone --depth=1 --branch v1.91.6 https://github.com/ocornut/imgui.git
           echo "ImGui files: $(find imgui -name '*.h' -o -name '*.cpp' | wc -l)"
-          ls imgui/backends/imgui_impl_opengl3*
 
-      - name: Compile libmatrix-hook.so (Dobby + ImGui + GLES2)
+      - name: Compile libmatrix-hook.so (xHook + ImGui + GLES2)
         run: |
           LLVM="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
           CXX="$LLVM/aarch64-linux-android24-clang++"
           SYSROOT="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
 
           echo "Toolchain : $($CXX --version | head -1)"
-          echo "Dobby lib : $DOBBY_LIB"
-          [ -f "$DOBBY_LIB" ] || { echo "ERROR: DOBBY_LIB is not a file: $DOBBY_LIB"; exit 1; }
 
           $CXX \
             --sysroot="$SYSROOT" \
@@ -138,14 +67,19 @@ jobs:
             -DIMGUI_IMPL_OPENGL_ES2 \
             -I imgui \
             -I imgui/backends \
-            -I "$DOBBY_INC" \
+            -I xHook/libxhook/jni \
             mod_menu/subway/hook.cpp \
             imgui/imgui.cpp \
             imgui/imgui_draw.cpp \
             imgui/imgui_tables.cpp \
             imgui/imgui_widgets.cpp \
             imgui/backends/imgui_impl_opengl3.cpp \
-            "$DOBBY_LIB" \
+            xHook/libxhook/jni/xhook.c \
+            xHook/libxhook/jni/xh_core.c \
+            xHook/libxhook/jni/xh_elf.c \
+            xHook/libxhook/jni/xh_log.c \
+            xHook/libxhook/jni/xh_util.c \
+            xHook/libxhook/jni/xh_version.c \
             -lEGL -lGLESv2 -landroid -llog -ldl \
             -Wl,--strip-all \
             -o libmatrix-hook.so
@@ -153,7 +87,7 @@ jobs:
           echo "Hook size : $(du -sh libmatrix-hook.so)"
           file libmatrix-hook.so
           readelf -d libmatrix-hook.so | grep NEEDED
-          nm -D libmatrix-hook.so | grep -v " U " | grep -v "__cxa\|__gnu\|_ZN\|_ZS\|_ZT\|_ZZ" | head -10
+          nm -D libmatrix-hook.so | grep " T " | grep -v "_ZN\|_ZT\|_ZS\|__cxa" | head -10
 
       - name: Compile libmain.so stub (pure C)
         run: |
@@ -226,9 +160,9 @@ jobs:
 
       - name: Build summary
         run: |
-          echo "## Subway Surfers — Dobby + ImGui Mod Menu" >> $GITHUB_STEP_SUMMARY
+          echo "## Subway Surfers — xHook + ImGui Mod Menu" >> $GITHUB_STEP_SUMMARY
           echo "| File | Role |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| \`libmatrix-hook.so\` | Dobby hooks + ImGui GLES2 overlay |" >> $GITHUB_STEP_SUMMARY
-          echo "| \`libmain.so\` | C stub — loads matrix-hook via absolute path |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`libmatrix-hook.so\` | xhook GOT-patch + ImGui GLES2 overlay |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`libmain.so\` | C stub — loads matrix-hook via absolute dlopen |" >> $GITHUB_STEP_SUMMARY
           echo "| \`libmain_orig.so\` | Original Unity libmain (preserved) |" >> $GITHUB_STEP_SUMMARY
