@@ -191,7 +191,7 @@ jobs:
           echo "Building..."
           CSPROJ=$(find Il2CppDumperSrc -name "Il2CppDumper.csproj" | head -1)
           dotnet publish "$CSPROJ" \
-            -c Release -r linux-x64 --self-contained true \
+            -f net8.0 -c Release -r linux-x64 --self-contained true \
             -o Il2CppDumperPatched/ \
             -p:PublishSingleFile=true \
             -p:IncludeAllContentForSelfExtract=true \
