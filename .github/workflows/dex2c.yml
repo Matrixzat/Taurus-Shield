@@ -167,9 +167,31 @@ jobs:
           cp "$GITHUB_WORKSPACE/$FILTER_PATH" ~/dex2c/filter.txt
           cd ~/dex2c
           echo "Running dcc.py..."
+          set +e
           python3 dcc.py -a input.apk -o out.apk --filter filter.txt -p --allow-global \
             2>&1 | tee "$GITHUB_WORKSPACE/dex2c_run.log"
-          exit ${PIPESTATUS[0]}
+          DCC_RC=${PIPESTATUS[0]}
+          set -e
+
+          # dcc.py exits 0 but writes nothing when filter matches no methods.
+          # Fall back to the original APK so the pipeline always delivers output.
+          if [ ! -f out.apk ]; then
+            if grep -q "No methods compiled" "$GITHUB_WORKSPACE/dex2c_run.log" 2>/dev/null; then
+              echo "WARNING: No methods matched the filter — returning original APK unchanged."
+              echo "  Ensure filter.txt uses Dalvik descriptor format, e.g.:"
+              echo "    Lcom/example/MyClass;->.*"
+              cp input.apk out.apk
+              printf "WARNING: 0 methods compiled.\nFilter did not match any methods in this APK.\n" \
+                > compiled_methods.txt
+            else
+              echo "ERROR: dcc.py failed (exit $DCC_RC) and produced no output."
+              cat "$GITHUB_WORKSPACE/dex2c_run.log" || true
+              exit 1
+            fi
+          else
+            echo "Protection complete: $(wc -c < out.apk) bytes"
+            exit $DCC_RC
+          fi
         timeout-minutes: 45
 
       - name: Collect output
@@ -177,15 +199,17 @@ jobs:
           mkdir -p dex2c_output
           if [ -f ~/dex2c/out.apk ]; then
             cp ~/dex2c/out.apk dex2c_output/
-            echo "Protected APK: $(wc -c < dex2c_output/out.apk) bytes"
+            echo "Output APK: $(wc -c < dex2c_output/out.apk) bytes"
           else
-            echo "ERROR: out.apk not found"
+            echo "ERROR: out.apk missing after protection step — this should not happen."
             find ~/dex2c/ -name "*.apk" -type f | head -10
             exit 1
           fi
+          # Source ZIP (only exists when real compilation happened)
           if ls ~/dex2c/project-source*.zip 1>/dev/null 2>&1; then
             cp ~/dex2c/project-source*.zip dex2c_output/
           fi
+          # compiled_methods.txt (real list or our fallback warning)
           if [ -f ~/dex2c/compiled_methods.txt ]; then
             cp ~/dex2c/compiled_methods.txt dex2c_output/
           fi
