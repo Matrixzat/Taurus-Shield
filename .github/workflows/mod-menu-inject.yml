@@ -58,209 +58,246 @@ jobs:
           echo "$(pwd)/android-ndk-${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin" >> $GITHUB_PATH
           echo "NDK ready: android-ndk-${NDK_VERSION}"
 
-      # ── 4. Write hook source ─────────────────────────────────────────────────
-      - name: Write hook.cpp
+      # ── 4. Write sources ─────────────────────────────────────────────────────
+      - name: Write sources
         run: |
           mkdir -p hook_src
-          cat > hook_src/hook.cpp << 'CPPSRC'
-          /**
-           * Taurus Shield — Subway Surfers 3.62.1 Runtime Hook
-           * Proxy for libmain.so — patches libil2cpp.so at runtime.
-           */
-          #include <android/log.h>
-          #include <dlfcn.h>
-          #include <jni.h>
-          #include <stdint.h>
-          #include <stdio.h>
-          #include <stdlib.h>
-          #include <string.h>
-          #include <sys/mman.h>
-          #include <unistd.h>
 
-          #define TAG  "TaurusHook"
-          #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
-          #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+          # ── libmatrix-hook.so — the full hook (all 21 patches) ───────────────
+          cat > hook_src/matrix_hook.cpp << 'CPPSRC'
+/**
+ * Taurus Shield — matrix-hook
+ * libmatrix-hook.so — Subway Surfers 3.62.1 Runtime Hook
+ *
+ * Loaded by libmain.so stub via dlopen.
+ * Constructor fires → finds libil2cpp.so base → writes 21 ARM64 patches.
+ */
+#include <android/log.h>
+#include <dlfcn.h>
+#include <jni.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
-          static uintptr_t getLibBase(const char* name) {
-              char line[512];
-              FILE* fp = fopen("/proc/self/maps", "r");
-              if (!fp) return 0;
-              while (fgets(line, sizeof(line), fp)) {
-                  if (strstr(line, name) && strstr(line, "r-xp")) {
-                      uintptr_t base = (uintptr_t)strtoull(line, nullptr, 16);
-                      fclose(fp);
-                      return base;
-                  }
-              }
-              fclose(fp);
-              return 0;
-          }
+#define TAG  "matrix-hook"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-          static void writeAt(uintptr_t addr, const uint32_t* insns, size_t count) {
-              size_t len  = count * 4;
-              long   pgsz = getpagesize();
-              uintptr_t page    = addr & ~(uintptr_t)(pgsz - 1);
-              size_t    pageLen = len + (addr - page);
-              mprotect((void*)page, pageLen, PROT_READ | PROT_WRITE | PROT_EXEC);
-              memcpy((void*)addr, insns, len);
-              mprotect((void*)page, pageLen, PROT_READ | PROT_EXEC);
-              __builtin___clear_cache((char*)addr, (char*)(addr + len));
-          }
+static uintptr_t getLibBase(const char* name) {
+    char line[512];
+    FILE* fp = fopen("/proc/self/maps", "r");
+    if (!fp) return 0;
+    while (fgets(line, sizeof(line), fp)) {
+        if (strstr(line, name) && strstr(line, "r-xp")) {
+            uintptr_t base = (uintptr_t)strtoull(line, nullptr, 16);
+            fclose(fp);
+            return base;
+        }
+    }
+    fclose(fp);
+    return 0;
+}
 
-          static void patchBool(uintptr_t base, uintptr_t off, bool val) {
-              uint32_t i[] = { val ? 0x52800020u : 0x52800000u, 0xD65F03C0u };
-              writeAt(base + off, i, 2);
-              LOGI("  bool  @0x%lX = %s", (unsigned long)off, val ? "true" : "false");
-          }
+static void writeAt(uintptr_t addr, const uint32_t* insns, size_t count) {
+    size_t    len     = count * 4;
+    long      pgsz    = getpagesize();
+    uintptr_t page    = addr & ~(uintptr_t)(pgsz - 1);
+    size_t    pageLen = len + (addr - page);
+    mprotect((void*)page, pageLen, PROT_READ | PROT_WRITE | PROT_EXEC);
+    memcpy((void*)addr, insns, len);
+    mprotect((void*)page, pageLen, PROT_READ | PROT_EXEC);
+    __builtin___clear_cache((char*)addr, (char*)(addr + len));
+}
 
-          static void patchInt16(uintptr_t base, uintptr_t off, uint16_t val) {
-              uint32_t i[] = { (uint32_t)(0x52800000u | ((uint32_t)val << 5)), 0xD65F03C0u };
-              writeAt(base + off, i, 2);
-              LOGI("  int   @0x%lX = %u", (unsigned long)off, (unsigned)val);
-          }
+static void patchBool(uintptr_t base, uintptr_t off, bool val) {
+    uint32_t i[] = { val ? 0x52800020u : 0x52800000u, 0xD65F03C0u };
+    writeAt(base + off, i, 2);
+    LOGI("  bool  @0x%lX = %s", (unsigned long)off, val ? "true" : "false");
+}
 
-          static void patchInt32(uintptr_t base, uintptr_t off, uint32_t val) {
-              uint16_t lo = (uint16_t)(val & 0xFFFF);
-              uint16_t hi = (uint16_t)(val >> 16);
-              uint32_t i[] = {
-                  (uint32_t)(0x52800000u | ((uint32_t)lo << 5)),
-                  (uint32_t)(0x72A00000u | ((uint32_t)hi << 5)),
-                  0xD65F03C0u
-              };
-              writeAt(base + off, i, 3);
-              LOGI("  int32 @0x%lX = %u", (unsigned long)off, val);
-          }
+static void patchInt16(uintptr_t base, uintptr_t off, uint16_t val) {
+    uint32_t i[] = { (uint32_t)(0x52800000u | ((uint32_t)val << 5)), 0xD65F03C0u };
+    writeAt(base + off, i, 2);
+    LOGI("  int   @0x%lX = %u", (unsigned long)off, (unsigned)val);
+}
 
-          static void patchFloat(uintptr_t base, uintptr_t off, float val) {
-              uint32_t bits;
-              memcpy(&bits, &val, 4);
-              uint16_t lo = (uint16_t)(bits & 0xFFFF);
-              uint16_t hi = (uint16_t)(bits >> 16);
-              uint32_t i[] = {
-                  (uint32_t)(0x52800000u | ((uint32_t)lo << 5)),
-                  (uint32_t)(0x72A00000u | ((uint32_t)hi << 5)),
-                  0x1E270000u,
-                  0xD65F03C0u
-              };
-              writeAt(base + off, i, 4);
-              LOGI("  float @0x%lX = %.3f", (unsigned long)off, (double)val);
-          }
+static void patchInt32(uintptr_t base, uintptr_t off, uint32_t val) {
+    uint16_t lo = (uint16_t)(val & 0xFFFF);
+    uint16_t hi = (uint16_t)(val >> 16);
+    uint32_t i[] = {
+        (uint32_t)(0x52800000u | ((uint32_t)lo << 5)),
+        (uint32_t)(0x72A00000u | ((uint32_t)hi << 5)),
+        0xD65F03C0u
+    };
+    writeAt(base + off, i, 3);
+    LOGI("  int32 @0x%lX = %u", (unsigned long)off, val);
+}
 
-          static void patchVoid(uintptr_t base, uintptr_t off) {
-              uint32_t i[] = { 0xD65F03C0u };
-              writeAt(base + off, i, 1);
-              LOGI("  void  @0x%lX silenced", (unsigned long)off);
-          }
+static void patchFloat(uintptr_t base, uintptr_t off, float val) {
+    uint32_t bits;
+    memcpy(&bits, &val, 4);
+    uint16_t lo = (uint16_t)(bits & 0xFFFF);
+    uint16_t hi = (uint16_t)(bits >> 16);
+    uint32_t i[] = {
+        (uint32_t)(0x52800000u | ((uint32_t)lo << 5)),
+        (uint32_t)(0x72A00000u | ((uint32_t)hi << 5)),
+        0x1E270000u,
+        0xD65F03C0u
+    };
+    writeAt(base + off, i, 4);
+    LOGI("  float @0x%lX = %.3f", (unsigned long)off, (double)val);
+}
 
-          static void applyPatches(uintptr_t base) {
-              LOGI("=== Taurus Shield — Subway Surfers 3.62.1 ===");
-              LOGI("libil2cpp base: 0x%lX", (unsigned long)base);
+static void patchVoid(uintptr_t base, uintptr_t off) {
+    uint32_t i[] = { 0xD65F03C0u };
+    writeAt(base + off, i, 1);
+    LOGI("  void  @0x%lX silenced", (unsigned long)off);
+}
 
-              // Ads
-              patchVoid (base, 0x1043C64);
-              patchVoid (base, 0x1150264);
-              patchBool (base, 0x3247894, false);
-              // IAP
-              patchBool (base, 0x32477FC, true);
-              // Currency 999999
-              patchInt32(base, 0x158EF98, 999999u);
-              patchInt32(base, 0x32B4820, 999999u);
-              // Jump
-              patchInt16(base, 0xF9EFD4, 100);
-              patchFloat(base, 0xF9EFF4, 3.0f);
-              // Speed
-              patchFloat(base, 0xF9F454, 5.0f);
-              patchFloat(base, 0xF9F624, 5.0f);
-              patchBool (base, 0xF9F3C8, true);
-              patchFloat(base, 0xF9F48C, 0.5f);
-              patchFloat(base, 0xF9F674, 0.5f);
-              // Score
-              patchBool (base, 0x13918C4, true);
-              patchBool (base, 0x13919DC, true);
-              patchInt16(base, 0x1392030, 5);
-              patchBool (base, 0x1021B20, true);
-              // Powerups
-              patchBool (base, 0xFC2538, true);
-              patchBool (base, 0xFC2548, true);
-              patchBool (base, 0xFC2578, true);
-              // Revive
-              patchBool (base, 0x13D570C, true);
+static void applyPatches(uintptr_t base) {
+    LOGI("=== matrix-hook — Subway Surfers 3.62.1 ===");
+    LOGI("libil2cpp base: 0x%lX", (unsigned long)base);
+    patchVoid (base, 0x1043C64);
+    patchVoid (base, 0x1150264);
+    patchBool (base, 0x3247894, false);
+    patchBool (base, 0x32477FC, true);
+    patchInt32(base, 0x158EF98, 999999u);
+    patchInt32(base, 0x32B4820, 999999u);
+    patchInt16(base, 0xF9EFD4,  100);
+    patchFloat(base, 0xF9EFF4,  3.0f);
+    patchFloat(base, 0xF9F454,  5.0f);
+    patchFloat(base, 0xF9F624,  5.0f);
+    patchBool (base, 0xF9F3C8,  true);
+    patchFloat(base, 0xF9F48C,  0.5f);
+    patchFloat(base, 0xF9F674,  0.5f);
+    patchBool (base, 0x13918C4, true);
+    patchBool (base, 0x13919DC, true);
+    patchInt16(base, 0x1392030, 5);
+    patchBool (base, 0x1021B20, true);
+    patchBool (base, 0xFC2538,  true);
+    patchBool (base, 0xFC2548,  true);
+    patchBool (base, 0xFC2578,  true);
+    patchBool (base, 0x13D570C, true);
+    LOGI("=== 21 patches applied ===");
+}
 
-              LOGI("=== 21 patches applied ===");
-          }
+__attribute__((constructor))
+static void onLoad() {
+    LOGI("matrix-hook loaded");
+    uintptr_t base = 0;
+    for (int i = 0; i < 40 && !base; i++) {
+        base = getLibBase("libil2cpp.so");
+        if (!base) usleep(50000);
+    }
+    if (!base) { LOGE("libil2cpp.so not found — patches skipped"); return; }
+    applyPatches(base);
+}
+CPPSRC
 
-          __attribute__((constructor))
-          static void onLoad() {
-              LOGI("Taurus Shield hook loaded — waiting for libil2cpp...");
-              uintptr_t base = 0;
-              for (int i = 0; i < 40 && !base; i++) {
-                  base = getLibBase("libil2cpp.so");
-                  if (!base) usleep(50000);
-              }
-              if (!base) { LOGE("libil2cpp.so base not found"); return; }
-              applyPatches(base);
-          }
+          # ── libmain.so stub — tiny loader that boots matrix-hook ─────────────
+          cat > hook_src/loader_stub.c << 'CSRC'
+/**
+ * Taurus Shield — libmain.so loader stub
+ *
+ * Replaces the original libmain.so in the APK.
+ * 1. Constructor → dlopen libmatrix-hook.so  (triggers all patches)
+ * 2. JNI_OnLoad  → forwarded to libmain_orig.so (original Unity init)
+ */
+#include <android/log.h>
+#include <dlfcn.h>
+#include <jni.h>
 
-          extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
-              void* orig = dlopen("libmain_orig.so", RTLD_NOW | RTLD_GLOBAL);
-              if (!orig) { LOGE("dlopen libmain_orig.so: %s", dlerror()); return JNI_VERSION_1_6; }
-              typedef jint (*fn_t)(JavaVM*, void*);
-              auto fn = (fn_t)dlsym(orig, "JNI_OnLoad");
-              if (!fn) { LOGE("JNI_OnLoad not in libmain_orig"); return JNI_VERSION_1_6; }
-              LOGI("Forwarding JNI_OnLoad → libmain_orig");
-              return fn(vm, reserved);
-          }
-          CPPSRC
-          echo "hook.cpp written ($(wc -l < hook_src/hook.cpp) lines)"
+#define TAG "matrix-stub"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
 
-      # ── 5. Compile hook.so with NDK clang ────────────────────────────────────
-      - name: Compile libmain.so (ARM64)
+__attribute__((constructor))
+static void loadHook(void) {
+    LOGI("Loading libmatrix-hook.so...");
+    void* h = dlopen("libmatrix-hook.so", RTLD_NOW | RTLD_GLOBAL);
+    if (!h) LOGE("dlopen libmatrix-hook.so failed: %s", dlerror());
+    else     LOGI("libmatrix-hook.so loaded OK");
+}
+
+JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
+    void* orig = dlopen("libmain_orig.so", RTLD_NOW | RTLD_GLOBAL);
+    if (!orig) {
+        LOGE("dlopen libmain_orig.so failed: %s", dlerror());
+        return JNI_VERSION_1_6;
+    }
+    typedef jint (*fn_t)(JavaVM*, void*);
+    fn_t fn = (fn_t)dlsym(orig, "JNI_OnLoad");
+    if (!fn) { LOGE("JNI_OnLoad not in libmain_orig"); return JNI_VERSION_1_6; }
+    LOGI("Forwarding JNI_OnLoad → libmain_orig");
+    return fn(vm, reserved);
+}
+CSRC
+
+          echo "matrix_hook.cpp: $(wc -l < hook_src/matrix_hook.cpp) lines"
+          echo "loader_stub.c:   $(wc -l < hook_src/loader_stub.c) lines"
+
+      # ── 5. Compile both libraries ─────────────────────────────────────────────
+      - name: Compile libmatrix-hook.so + libmain.so stub (ARM64)
         run: |
-          CLANG="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++"
+          CXX="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang++"
+          CC="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android24-clang"
           SYSROOT="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+          # -static-libstdc++ embeds the C++ runtime into our .so so we don't
+          # depend on libc++_shared.so — Unity games don't ship that separately.
+          FLAGS="--sysroot=$SYSROOT -target aarch64-linux-android24 -shared -fPIC -O2 -fvisibility=hidden -Wl,--strip-all -static-libstdc++"
 
-          $CLANG \
-            --sysroot="$SYSROOT" \
-            -target aarch64-linux-android24 \
-            -shared \
-            -fPIC \
-            -std=c++17 \
-            -O2 \
-            -fvisibility=hidden \
-            -Wl,--strip-all \
-            -o hook_libmain.so \
-            hook_src/hook.cpp \
-            -llog \
-            -ldl \
-            -landroid
+          echo "── Compiling libmatrix-hook.so ──"
+          $CXX $FLAGS -std=c++17 \
+            -o libmatrix-hook.so hook_src/matrix_hook.cpp \
+            -llog -ldl
+          echo "  size: $(du -sh libmatrix-hook.so)"
+          file libmatrix-hook.so
 
-          echo "=== Built hook library ==="
-          ls -lh hook_libmain.so
-          file hook_libmain.so
-          # Show exported symbols (should only be JNI_OnLoad + constructor)
-          nm -D hook_libmain.so | grep -v "U " | awk '{print $3}' || true
+          echo "── Compiling libmain.so stub ──"
+          # Pure C stub — no C++ runtime needed at all
+          $CC --sysroot=$SYSROOT -target aarch64-linux-android24 -shared -fPIC -O2 -fvisibility=hidden -Wl,--strip-all \
+            -o libmain_stub.so hook_src/loader_stub.c \
+            -llog -ldl
+          echo "  size: $(du -sh libmain_stub.so)"
+          file libmain_stub.so
+
+          echo "=== Exported symbols ==="
+          echo "libmatrix-hook.so:"; nm -D libmatrix-hook.so | grep -v "U " | awk '{print "  "$3}' || true
+          echo "libmain_stub.so:";   nm -D libmain_stub.so   | grep -v "U " | awk '{print "  "$3}' || true
+          echo "=== Verify no libc++_shared dependency ==="
+          readelf -d libmatrix-hook.so | grep NEEDED || true
+          readelf -d libmain_stub.so   | grep NEEDED || true
 
       # ── 6. Inject into APK ───────────────────────────────────────────────────
-      - name: Inject hook into APK
+      - name: Inject matrix-hook into APK
         run: |
           python3 - <<'PYEOF'
           import os, shutil, zipfile
 
-          # Rename original libmain.so → libmain_orig.so
-          orig = "apk_work/lib/arm64-v8a/libmain.so"
-          dest = "apk_work/lib/arm64-v8a/libmain_orig.so"
-          if os.path.exists(orig):
-              shutil.copy2(orig, dest)
-              print(f"Backed up: libmain.so → libmain_orig.so  ({os.path.getsize(dest):,} bytes)")
+          lib_dir = "apk_work/lib/arm64-v8a"
+
+          # 1. Rename original libmain.so → libmain_orig.so
+          orig_main = os.path.join(lib_dir, "libmain.so")
+          bak_main  = os.path.join(lib_dir, "libmain_orig.so")
+          if os.path.exists(orig_main):
+              shutil.copy2(orig_main, bak_main)
+              print(f"Backed up:  libmain.so → libmain_orig.so  ({os.path.getsize(bak_main):,} bytes)")
           else:
               print("WARNING: libmain.so not found in APK")
 
-          # Replace libmain.so with our hook
-          shutil.copy2("hook_libmain.so", orig)
-          print(f"Injected: hook_libmain.so → lib/arm64-v8a/libmain.so  ({os.path.getsize(orig):,} bytes)")
+          # 2. Place our stub as libmain.so
+          shutil.copy2("libmain_stub.so", orig_main)
+          print(f"Stub:       libmain_stub.so → libmain.so      ({os.path.getsize(orig_main):,} bytes)")
 
-          # Repack APK — .so files MUST be ZIP_STORED (uncompressed) for the
-          # dynamic linker to mmap them directly from the APK on Android 6+
+          # 3. Add libmatrix-hook.so as a new library
+          hook_dst = os.path.join(lib_dir, "libmatrix-hook.so")
+          shutil.copy2("libmatrix-hook.so", hook_dst)
+          print(f"Hook:       libmatrix-hook.so added            ({os.path.getsize(hook_dst):,} bytes)")
+
+          # 4. Repack — .so files MUST be ZIP_STORED for Android dynamic linker
           print("\nRepacking APK...")
           orig_info = {}
           with zipfile.ZipFile("game.apk") as z:
@@ -273,25 +310,27 @@ jobs:
                   for fname in sorted(files):
                       fp  = os.path.join(root, fname)
                       arc = os.path.relpath(fp, "apk_work")
-                      if arc.endswith(".so"):
-                          compress = zipfile.ZIP_STORED     # mandatory for native libs
-                      elif arc in orig_info:
-                          compress = orig_info[arc]
-                      else:
-                          compress = zipfile.ZIP_DEFLATED
+                      compress = zipfile.ZIP_STORED if arc.endswith(".so") else orig_info.get(arc, zipfile.ZIP_DEFLATED)
                       zout.write(fp, arc, compress)
 
           sz = os.path.getsize(out)
           print(f"\n✅ Output: {out}  ({sz // 1024 // 1024} MB)")
 
-          # Verify injection
+          # 5. Verify
           with zipfile.ZipFile(out) as vz:
               names = vz.namelist()
-              for n in ["lib/arm64-v8a/libmain.so", "lib/arm64-v8a/libmain_orig.so"]:
-                  status = "✅" if n in names else "❌ MISSING"
-                  info = vz.getinfo(n) if n in names else None
-                  sz_kb = (info.file_size // 1024) if info else 0
-                  ctype = "STORED" if (info and info.compress_type == 0) else "DEFLATED"
+              checks = [
+                  "lib/arm64-v8a/libmatrix-hook.so",
+                  "lib/arm64-v8a/libmain.so",
+                  "lib/arm64-v8a/libmain_orig.so",
+              ]
+              print("\n=== Injection verification ===")
+              for n in checks:
+                  ok   = n in names
+                  info = vz.getinfo(n) if ok else None
+                  sz_kb  = (info.file_size  // 1024) if info else 0
+                  ctype  = "STORED" if (info and info.compress_type == 0) else "DEFLATED"
+                  status = "✅" if ok else "❌ MISSING"
                   print(f"  {status} {n}  ({sz_kb} KB, {ctype})")
           PYEOF
 
@@ -305,27 +344,26 @@ jobs:
 
       - name: Summary
         run: |
-          echo "## Subway Surfers Runtime Mod Menu ✅" >> $GITHUB_STEP_SUMMARY
+          echo "## Subway Surfers — matrix-hook Injected ✅" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Injection Method" >> $GITHUB_STEP_SUMMARY
-          echo "- **libmain.so replaced** with Taurus Shield runtime hook" >> $GITHUB_STEP_SUMMARY
-          echo "- **libmain_orig.so** = original, proxied via JNI_OnLoad" >> $GITHUB_STEP_SUMMARY
-          echo "- **No static binary modification** — all patches applied at runtime" >> $GITHUB_STEP_SUMMARY
+          echo "### Library layout inside APK" >> $GITHUB_STEP_SUMMARY
+          echo "| File | Role |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| \`libmatrix-hook.so\` | **Our hook** — 21 runtime patches applied via ARM64 writes |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`libmain.so\` | Tiny loader stub — dlopen's libmatrix-hook, forwards JNI_OnLoad |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`libmain_orig.so\` | Original Unity libmain (proxied, untouched) |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Patches Applied (all at runtime)" >> $GITHUB_STEP_SUMMARY
+          echo "### Patches (all runtime, zero binary modification)" >> $GITHUB_STEP_SUMMARY
           echo "| Feature | Offset | Value |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| TryShowInterstitial | 0x1043C64 | silenced |" >> $GITHUB_STEP_SUMMARY
+          echo "| Ads silenced | 0x1043C64 / 0x1150264 | void |" >> $GITHUB_STEP_SUMMARY
           echo "| get_IsAdCost | 0x3247894 | false |" >> $GITHUB_STEP_SUMMARY
           echo "| get_IsIAP | 0x32477FC | true |" >> $GITHUB_STEP_SUMMARY
           echo "| GetCurrency ×2 | 0x158EF98 / 0x32B4820 | 999,999 |" >> $GITHUB_STEP_SUMMARY
           echo "| get_JumpLimit | 0xF9EFD4 | 100 |" >> $GITHUB_STEP_SUMMARY
           echo "| get_SpeedMultiplier ×2 | 0xF9F454 / 0xF9F624 | 5× |" >> $GITHUB_STEP_SUMMARY
           echo "| get_GravityMultiplier ×2 | 0xF9F48C / 0xF9F674 | 0.5× |" >> $GITHUB_STEP_SUMMARY
-          echo "| get_MagnetActive | 0xFC2538 | true |" >> $GITHUB_STEP_SUMMARY
-          echo "| get_SuperSneakersActive | 0xFC2548 | true |" >> $GITHUB_STEP_SUMMARY
-          echo "| get_HoverboardActive | 0xFC2578 | true |" >> $GITHUB_STEP_SUMMARY
+          echo "| Powerups (Magnet/Sneakers/Hoverboard) | 0xFC2538-78 | true |" >> $GITHUB_STEP_SUMMARY
           echo "| get_CanRevive | 0x13D570C | true |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Next Step" >> $GITHUB_STEP_SUMMARY
-          echo "Download **subway-modded-unsigned** artifact → sign with MT Manager → install" >> $GITHUB_STEP_SUMMARY
+          echo "**Next:** Download artifact → MT Manager → sign → install" >> $GITHUB_STEP_SUMMARY
