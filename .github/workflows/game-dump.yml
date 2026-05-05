@@ -155,37 +155,25 @@ jobs:
 
           echo "Patching Metadata.cs to extend version support to v42..."
           python3 - <<'PYEOF'
-          import re, glob, os
-
+          import re, glob
           for fp in glob.glob('Il2CppDumperSrc/**/*.cs', recursive=True):
               txt = open(fp, encoding='utf-8', errors='replace').read()
               if 'not a supported version' not in txt:
                   continue
               print(f'Found version check in: {fp}')
-
-              # Strategy 1: Add goto/fall-through cases before the default throw
-              # Replace:  default:\n..throw new InvalidDataException(..."not a supported version"
-              # With:     case 32: case 33: ... case 42: goto case 31;\n default: throw...
-              extra = 'case 32: case 33: case 34: case 35: case 36: case 37: case 38: case 39: case 40: case 41: case 42:\n                    goto case 31;\n                '
-              patched = re.sub(
-                  r'(default:\s*\n\s*throw new[^\n]*not a supported version[^\n]*)',
-                  extra + r'\1',
-                  txt
-              )
+              # Insert case 32..42 labels right after "case 31:" so they share the same handler
+              patched = re.sub(r'(case 31:)', r'
+                case 32: case 33: case 34: case 35: case 36: case 37: case 38: case 39: case 40: case 41: case 42:', txt, count=1)
+              if patched == txt:
+                  # Last-resort: neutralise the throw by replacing with a no-op statement
+                  patched = re.sub(r'throw new \w+\([^)]*not a supported version[^)]*\);', '/* version accepted */ break;', txt)
               if patched != txt:
                   open(fp, 'w', encoding='utf-8').write(patched)
-                  print(f'  Patched with goto case 31')
-                  continue
-
-              # Strategy 2: Simply suppress the throw (replace with Console.WriteLine)
-              patched2 = re.sub(
-                  r'throw new[^\n]*not a supported version[^\n]*',
-                  'Console.Error.WriteLine($"[WARN] metadata version {version} not officially supported — continuing")',
-                  txt
-              )
-              if patched2 != txt:
-                  open(fp, 'w', encoding='utf-8').write(patched2)
-                  print(f'  Patched by suppressing throw')
+                  print('  Patch applied')
+              else:
+                  print('  WARNING: patch did not match - dumping context')
+                  idx = txt.find('not a supported version')
+                  print(repr(txt[max(0,idx-200):idx+200]))
           PYEOF
 
           echo "Building..."
