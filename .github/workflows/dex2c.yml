@@ -225,8 +225,14 @@ jobs:
             echo "No out.apk to sign — skipping"; exit 0
           fi
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/release.keystore
+
+          # zipalign may fail on already-v2-signed APKs (offset mismatch).
+          # Fall back to a plain copy so apksigner can strip & replace signatures.
           echo "Zipaligning..."
-          zipalign -f 4 dex2c_output/out.apk dex2c_output/out_aligned.apk
+          zipalign -f 4 dex2c_output/out.apk dex2c_output/out_aligned.apk 2>/dev/null \
+            || { echo "zipalign failed — signing without re-alignment"; \
+                 cp dex2c_output/out.apk dex2c_output/out_aligned.apk; }
+
           echo "Signing..."
           apksigner sign \
             --ks /tmp/release.keystore \
