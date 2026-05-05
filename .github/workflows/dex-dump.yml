@@ -57,18 +57,63 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Download Frida server (x86_64 for emulator)
+      - name: Get latest Frida version
+        id: frida-ver
         run: |
-          FRIDA_VER=$(curl -sf https://api.github.com/repos/frida/frida/releases/latest | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
-          echo "Frida version: $FRIDA_VER"
-          curl -fL "https://github.com/frida/frida/releases/download/${FRIDA_VER}/frida-server-${FRIDA_VER}-android-x86_64.xz" -o frida-server.xz
+          VER=$(curl -sf https://api.github.com/repos/frida/frida/releases/latest | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Frida version: $VER"
+
+      - name: Cache Frida server binary
+        id: frida-cache
+        uses: actions/cache@v4
+        with:
+          path: frida-server-bin
+          key: frida-server-${{ steps.frida-ver.outputs.version }}-android-x86_64
+
+      - name: Download Frida server (x86_64 for emulator)
+        if: steps.frida-cache.outputs.cache-hit != 'true'
+        run: |
+          VER="${{ steps.frida-ver.outputs.version }}"
+          curl -fL "https://github.com/frida/frida/releases/download/${VER}/frida-server-${VER}-android-x86_64.xz" -o frida-server.xz
           xz -d frida-server.xz
           mv frida-server frida-server-bin
           chmod +x frida-server-bin
-          echo "frida_ver=$FRIDA_VER" >> "$GITHUB_ENV"
+          echo "Frida server downloaded and ready"
+
+      - name: Ensure frida-server is executable
+        run: chmod +x frida-server-bin
+
+      - name: Cache pip frida-tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-frida-tools-${{ steps.frida-ver.outputs.version }}-${{ runner.os }}
 
       - name: Install Frida Python tools (host)
-        run: pip install frida-tools
+        run: pip install "frida-tools~=14.0" "frida==${{ steps.frida-ver.outputs.version }}"
+
+      - name: Cache Android AVD
+        id: avd-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.android/avd/*
+            ~/.android/adb*
+          key: avd-api29-x86_64-google_apis-${{ runner.os }}
+
+      - name: Create AVD (if not cached)
+        if: steps.avd-cache.outputs.cache-hit != 'true'
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 29
+          target: google_apis
+          arch: x86_64
+          profile: Nexus 6
+          force-avd-creation: false
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: false
+          script: echo "AVD created and cached."
 
       - name: Run DEX dump inside Android emulator
         uses: reactivecircus/android-emulator-runner@v2
@@ -77,6 +122,7 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: Nexus 6
+          force-avd-creation: false
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           script: bash .github/scripts/run_dump.sh "${{ steps.pkg.outputs.package }}"
@@ -117,5 +163,5 @@ jobs:
           echo "## DEX Dump - ${{ steps.pkg.outputs.package }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Job ID:** ${{ inputs.job_id }}" >> $GITHUB_STEP_SUMMARY
           echo "- **DEX files dumped:** $DEX_COUNT" >> $GITHUB_STEP_SUMMARY
-          echo "- **Method:** Frida ClassLinker::DefineClass hook" >> $GITHUB_STEP_SUMMARY
+          echo "- **Method:** Frida attach + ClassLinker::DefineClass hook" >> $GITHUB_STEP_SUMMARY
           echo "- **Artifact:** dex-dump-${{ inputs.job_id }} (3-day retention)" >> $GITHUB_STEP_SUMMARY
