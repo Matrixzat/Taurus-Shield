@@ -21,7 +21,7 @@ jobs:
 
       - name: Download APK
         run: |
-          curl -L "${{ inputs.dropbox_url }}" -o game.apk
+          curl -L "${{ github.event.inputs.dropbox_url }}" -o game.apk
           echo "APK: $(du -sh game.apk)"
 
       - name: Extract APK
@@ -40,21 +40,41 @@ jobs:
           echo "NDK_ROOT=$NDK_ROOT" >> $GITHUB_ENV
           echo "Using NDK: $NDK_ROOT"
 
-      - name: Build Dobby (ARM64 Android)
+      - name: Build Dobby (ARM64 Android — NDK 27 asm fix)
         run: |
           git clone https://github.com/jmpews/Dobby.git --depth=1
-          mkdir -p Dobby/build_arm64 && cd Dobby/build_arm64
+
+          # ── Fix Apple ARM64 asm syntax → GNU/Android (NDK 27 clang) ─────────
+          # NDK 27's integrated assembler doesn't understand @PAGE / @PAGEOFF
+          # (Apple LLVM syntax).  Patch every .asm file in the repo:
+          #   symbol@PAGEOFF  →  :lo12:symbol   (add/ldr low-12 reloc)
+          #   symbol@PAGE     →  symbol          (adrp page reloc; suffix not needed)
+          find Dobby -name "*.asm" -o -name "*.S" | while read f; do
+            # Order matters: fix @PAGEOFF before stripping @PAGE
+            sed -i 's/\([a-zA-Z_][a-zA-Z0-9_]*\)@PAGEOFF/:lo12:\1/g' "$f"
+            sed -i 's/@PAGE//g' "$f"
+          done
+          echo "--- patched asm files ---"
+          grep -rn "@PAGE\|@PAGEOFF\|:lo12:" Dobby/source || true
+
+          mkdir -p Dobby/build_arm64
+          cd Dobby/build_arm64
           cmake .. \
-            -DCMAKE_TOOLCHAIN_FILE=$NDK_ROOT/build/cmake/android.toolchain.cmake \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK_ROOT/build/cmake/android.toolchain.cmake" \
             -DANDROID_ABI=arm64-v8a \
             -DANDROID_PLATFORM=android-24 \
             -DCMAKE_BUILD_TYPE=Release \
             -DPlugin.Android=ON \
             2>&1 | tail -5
-          make -j$(nproc) dobby 2>&1 | tail -8
-          find . -name "*.a" | while read f; do echo "  $(du -sh $f)  $f"; done
-          echo "DOBBY_LIB=$(pwd)/$(find . -name 'libdobby.a' | head -1)" >> $GITHUB_ENV
-          echo "DOBBY_INC=$(pwd)/../include" >> $GITHUB_ENV
+          make -j$(nproc) dobby 2>&1 | tail -10
+
+          # ── Resolve actual .a path (not the directory) ────────────────────────
+          DOBBY_A=$(find . -name 'libdobby.a' | head -1)
+          if [ -z "$DOBBY_A" ]; then echo "ERROR: libdobby.a not found"; exit 1; fi
+          DOBBY_A_ABS="$(pwd)/${DOBBY_A#./}"
+          echo "libdobby.a: $(du -sh $DOBBY_A_ABS)"
+          echo "DOBBY_LIB=$DOBBY_A_ABS" >> "$GITHUB_ENV"
+          echo "DOBBY_INC=$(pwd)/../include" >> "$GITHUB_ENV"
 
       - name: Download ImGui (v1.91.6)
         run: |
@@ -68,11 +88,13 @@ jobs:
           CXX="$LLVM/aarch64-linux-android24-clang++"
           SYSROOT="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
 
-          echo "Toolchain: $($CXX --version | head -1)"
-          echo "Dobby lib: $DOBBY_LIB"
+          echo "Toolchain : $($CXX --version | head -1)"
+          echo "Dobby lib : $DOBBY_LIB"
+          echo "Dobby inc : $DOBBY_INC"
+          [ -f "$DOBBY_LIB" ] || { echo "ERROR: DOBBY_LIB is not a file"; exit 1; }
 
           $CXX \
-            --sysroot=$SYSROOT \
+            --sysroot="$SYSROOT" \
             -target aarch64-linux-android24 \
             -shared -fPIC -O2 -fvisibility=hidden \
             -std=c++17 -static-libstdc++ \
@@ -91,7 +113,7 @@ jobs:
             -Wl,--strip-all \
             -o libmatrix-hook.so
 
-          echo "Hook size: $(du -sh libmatrix-hook.so)"
+          echo "Hook size : $(du -sh libmatrix-hook.so)"
           file libmatrix-hook.so
           readelf -d libmatrix-hook.so | grep NEEDED
           nm -D libmatrix-hook.so | grep -v " U " | grep -v "__cxa\|__gnu\|_ZN\|_ZS\|_ZT\|_ZZ" | head -10
@@ -103,7 +125,7 @@ jobs:
           SYSROOT="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
 
           $CC \
-            --sysroot=$SYSROOT \
+            --sysroot="$SYSROOT" \
             -target aarch64-linux-android24 \
             -shared -fPIC -O2 -fvisibility=hidden \
             mod_menu/subway/loader_stub.c \
@@ -111,15 +133,15 @@ jobs:
             -Wl,--strip-all \
             -o libmain_stub.so
 
-          echo "Stub size: $(du -sh libmain_stub.so)"
+          echo "Stub size : $(du -sh libmain_stub.so)"
           readelf -d libmain_stub.so | grep NEEDED
 
       - name: Inject into APK
         run: |
-          python3 - <<'PYEOF'
+          python3 - <<'PYEOF2'
           import os, shutil, zipfile
 
-          lib_dir    = "apk_work/lib/arm64-v8a"
+          lib_dir = "apk_work/lib/arm64-v8a"
 
           orig = os.path.join(lib_dir, "libmain.so")
           bak  = os.path.join(lib_dir, "libmain_orig.so")
@@ -134,7 +156,8 @@ jobs:
 
           orig_ct = {}
           with zipfile.ZipFile("game.apk") as z:
-              for i in z.infolist(): orig_ct[i.filename] = i.compress_type
+              for i in z.infolist():
+                  orig_ct[i.filename] = i.compress_type
 
           out = "subway_modded_unsigned.apk"
           with zipfile.ZipFile(out, "w") as zout:
@@ -142,33 +165,34 @@ jobs:
                   for fn in sorted(files):
                       fp  = os.path.join(root, fn)
                       arc = os.path.relpath(fp, "apk_work")
-                      ct  = zipfile.ZIP_STORED if arc.endswith(".so") else orig_ct.get(arc, zipfile.ZIP_DEFLATED)
+                      ct  = zipfile.ZIP_STORED if arc.endswith(".so") else \
+                            orig_ct.get(arc, zipfile.ZIP_DEFLATED)
                       zout.write(fp, arc, ct)
 
           sz = os.path.getsize(out)
-          print(f"\nOutput: {out}  ({sz//1024//1024} MB)")
+          print(f"\nOutput: {out}  ({sz // 1024 // 1024} MB)")
           with zipfile.ZipFile(out) as vz:
               names = vz.namelist()
               for n in ["lib/arm64-v8a/libmatrix-hook.so",
                         "lib/arm64-v8a/libmain.so",
                         "lib/arm64-v8a/libmain_orig.so"]:
-                  ok = n in names
-                  sz_kb = (vz.getinfo(n).file_size//1024) if ok else 0
-                  print(f"  {'OK' if ok else 'MISS'} {n}  ({sz_kb} KB)")
-          PYEOF
+                  ok    = n in names
+                  kb    = (vz.getinfo(n).file_size // 1024) if ok else 0
+                  print(f"  {'OK  ' if ok else 'MISS'} {n}  ({kb} KB)")
+          PYEOF2
 
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: subway-modded-unsigned
           path: subway_modded_unsigned.apk
           retention-days: 7
 
-      - name: Summary
+      - name: Build summary
         run: |
           echo "## Subway Surfers — Dobby + ImGui Mod Menu" >> $GITHUB_STEP_SUMMARY
           echo "| File | Role |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| libmatrix-hook.so | Hook — Dobby patches + ImGui GL overlay |" >> $GITHUB_STEP_SUMMARY
-          echo "| libmain.so | C stub — loads matrix-hook via absolute path |" >> $GITHUB_STEP_SUMMARY
-          echo "| libmain_orig.so | Original Unity libmain |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`libmatrix-hook.so\` | Dobby hooks + ImGui GLES2 overlay |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`libmain.so\` | C stub — dlopen matrix-hook via absolute path |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`libmain_orig.so\` | Original Unity libmain (preserved) |" >> $GITHUB_STEP_SUMMARY
