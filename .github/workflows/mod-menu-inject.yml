@@ -46,8 +46,7 @@ jobs:
 
       - name: Set up Android NDK
         run: |
-          # Use the NDK pre-installed on ubuntu-latest runners — no 633 MB download needed.
-          # Prefer NDK 27 (closest to r27c), fall back to whatever is available.
+          # Use pre-installed NDK on ubuntu-latest runners — no large download needed.
           NDK_ROOT=$(ls -d /usr/local/lib/android/sdk/ndk/27* 2>/dev/null | sort -V | tail -1)
           if [ -z "$NDK_ROOT" ]; then
             NDK_ROOT=$(ls -d /usr/local/lib/android/sdk/ndk/* 2>/dev/null | sort -V | tail -1)
@@ -59,7 +58,44 @@ jobs:
           fi
           echo "NDK_ROOT=$NDK_ROOT" >> $GITHUB_ENV
           echo "Using NDK: $NDK_ROOT"
-          ls "$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/" | grep "aarch64.*clang" | head -6
+
+      - name: Compile ModMenu.java → modmenu.dex
+        run: |
+          SDK_ROOT="/usr/local/lib/android/sdk"
+
+          # Find android.jar (prefer API 33, fall back to any available)
+          ANDROID_JAR=$(ls $SDK_ROOT/platforms/android-3*/android.jar 2>/dev/null | sort -V | tail -1)
+          if [ -z "$ANDROID_JAR" ]; then
+            ANDROID_JAR=$(ls $SDK_ROOT/platforms/*/android.jar 2>/dev/null | sort -V | tail -1)
+          fi
+          echo "android.jar: $ANDROID_JAR"
+
+          # Find d8 (DEX compiler) in build-tools
+          D8=$(ls $SDK_ROOT/build-tools/*/d8 2>/dev/null | sort -V | tail -1)
+          echo "d8: $D8"
+
+          mkdir -p dex_build
+
+          # Compile Java source
+          javac -source 8 -target 8 \
+            -bootclasspath "$ANDROID_JAR" \
+            -classpath "$ANDROID_JAR" \
+            -d dex_build \
+            mod_menu/subway/ModMenu.java
+          echo "javac OK — classes:"
+          find dex_build -name "*.class"
+
+          # Convert to DEX
+          $D8 --output dex_build \
+              --min-api 24 \
+              --lib "$ANDROID_JAR" \
+              dex_build/com/taurus/matrix/ModMenu.class
+          echo "d8 OK — dex files:"
+          ls -lh dex_build/*.dex
+
+          # Rename to modmenu.dex for asset loading
+          mv dex_build/classes.dex modmenu.dex
+          echo "modmenu.dex: $(du -sh modmenu.dex)"
 
       - name: Compile libmatrix-hook.so + libmain.so stub (ARM64)
         run: |
@@ -85,10 +121,6 @@ jobs:
           echo "  size: $(du -sh libmain_stub.so)"
           file libmain_stub.so
 
-          echo "=== Exported symbols ==="
-          nm -D libmatrix-hook.so | grep -v " U " | awk '{print "  matrix-hook:",$3}' || true
-          nm -D libmain_stub.so   | grep -v " U " | awk '{print "  stub:       ",$3}' || true
-
           echo "=== NEEDED libs (must NOT include libc++_shared.so) ==="
           readelf -d libmatrix-hook.so | grep NEEDED
           readelf -d libmain_stub.so   | grep NEEDED
@@ -99,20 +131,31 @@ jobs:
           import os, shutil, zipfile
 
           lib_dir = "apk_work/lib/arm64-v8a"
+          assets_dir = "apk_work/assets"
+          os.makedirs(assets_dir, exist_ok=True)
 
+          # Backup original libmain.so
           orig_main = os.path.join(lib_dir, "libmain.so")
           bak_main  = os.path.join(lib_dir, "libmain_orig.so")
           if os.path.exists(orig_main):
               shutil.copy2(orig_main, bak_main)
               print(f"Backed up:  libmain.so -> libmain_orig.so  ({os.path.getsize(bak_main):,} bytes)")
 
+          # Place stub as libmain.so
           shutil.copy2("libmain_stub.so", orig_main)
           print(f"Stub:       libmain_stub.so -> libmain.so      ({os.path.getsize(orig_main):,} bytes)")
 
+          # Place hook library
           hook_dst = os.path.join(lib_dir, "libmatrix-hook.so")
           shutil.copy2("libmatrix-hook.so", hook_dst)
           print(f"Hook:       libmatrix-hook.so added             ({os.path.getsize(hook_dst):,} bytes)")
 
+          # Place mod menu dex in assets
+          dex_dst = os.path.join(assets_dir, "modmenu.dex")
+          shutil.copy2("modmenu.dex", dex_dst)
+          print(f"DEX:        modmenu.dex -> assets/              ({os.path.getsize(dex_dst):,} bytes)")
+
+          # Preserve original compress types, .so always STORED
           orig_info = {}
           with zipfile.ZipFile("game.apk") as z:
               for info in z.infolist():
@@ -132,7 +175,10 @@ jobs:
 
           with zipfile.ZipFile(out) as vz:
               names = vz.namelist()
-              for n in ["lib/arm64-v8a/libmatrix-hook.so","lib/arm64-v8a/libmain.so","lib/arm64-v8a/libmain_orig.so"]:
+              for n in ["lib/arm64-v8a/libmatrix-hook.so",
+                        "lib/arm64-v8a/libmain.so",
+                        "lib/arm64-v8a/libmain_orig.so",
+                        "assets/modmenu.dex"]:
                   ok    = n in names
                   info  = vz.getinfo(n) if ok else None
                   sz_kb = (info.file_size // 1024) if info else 0
@@ -149,11 +195,12 @@ jobs:
 
       - name: Summary
         run: |
-          echo "## Subway Surfers — matrix-hook Injected" >> $GITHUB_STEP_SUMMARY
+          echo "## Subway Surfers — matrix-hook + Mod Menu" >> $GITHUB_STEP_SUMMARY
           echo "| File | Role |" >> $GITHUB_STEP_SUMMARY
           echo "|---|---|" >> $GITHUB_STEP_SUMMARY
-          echo "| libmatrix-hook.so | Hook — 21 runtime patches via dl_iterate_phdr |" >> $GITHUB_STEP_SUMMARY
-          echo "| libmain.so | C stub — finds matrix-hook via dladdr, forwards JNI_OnLoad |" >> $GITHUB_STEP_SUMMARY
+          echo "| libmatrix-hook.so | Hook — 8 togglable features, mod menu loader |" >> $GITHUB_STEP_SUMMARY
+          echo "| libmain.so | C stub — dladdr path fix + JNI_OnLoad forward |" >> $GITHUB_STEP_SUMMARY
           echo "| libmain_orig.so | Original Unity libmain (untouched) |" >> $GITHUB_STEP_SUMMARY
+          echo "| assets/modmenu.dex | Floating overlay UI (DexClassLoader) |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "Download artifact -> MT Manager -> sign -> install" >> $GITHUB_STEP_SUMMARY
