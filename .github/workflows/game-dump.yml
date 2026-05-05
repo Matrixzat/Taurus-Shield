@@ -163,6 +163,7 @@ jobs:
             --force-metadata-path "$(pwd)/il2cpp/global-metadata.dat" \
             --force-unity-version 2022.3.0 \
             --output-to cpp2il_out \
+            --use-processor attributeanalyzer,attributeinjector \
             --output-as dummydll \
             2>&1 | tee cpp2il_log.txt || true
           echo "=== Cpp2IL output files ==="
@@ -203,11 +204,13 @@ jobs:
           var results = new List<MethodEntry>();
           var dllPaths = Directory.GetFiles(dllDir, "*.dll", SearchOption.AllDirectories);
           var runtimeDlls = Directory.GetFiles(Path.GetDirectoryName(typeof(object).Assembly.Location)!, "*.dll");
-          var resolver = new PathAssemblyResolver(dllPaths.Concat(runtimeDlls));
+          var dllNames = new HashSet<string>(dllPaths.Select(Path.GetFileName)!, StringComparer.OrdinalIgnoreCase);
+          var runtimeFiltered = runtimeDlls.Where(r => !dllNames.Contains(Path.GetFileName(r)!)).ToArray();
 
           foreach (var dll in dllPaths)
           {
               try {
+                  var resolver = new PathAssemblyResolver(dllPaths.Concat(runtimeFiltered));
                   using var mlc = new MetadataLoadContext(resolver);
                   var asm = mlc.LoadFromAssemblyPath(dll);
                   foreach (var type in asm.GetTypes())
