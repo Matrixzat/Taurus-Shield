@@ -148,10 +148,11 @@ jobs:
           NDK_DIR="$HOME/android-ndk/android-ndk-r27c"
           APKTOOL_JAR="$HOME/tools/apktool.jar"
 
-          # apktool wrapper script (dcc.py expects a bash-runnable 'apktool' file)
-          mkdir -p ~/tools
-          printf '#!/usr/bin/env bash\nexec java -jar "%s" "$@"\n' "$APKTOOL_JAR" > ~/tools/apktool
-          chmod +x ~/tools/apktool
+          # dcc.py hardcodes APKTOOL3 = <dcc.py dir>/tools/apktool
+          # The wrapper MUST live at ~/dex2c/tools/apktool, not ~/tools/apktool
+          mkdir -p ~/dex2c/tools
+          printf '#!/usr/bin/env bash\nexec java -jar "%s" "$@"\n' "$APKTOOL_JAR" > ~/dex2c/tools/apktool
+          chmod +x ~/dex2c/tools/apktool
 
           # dcc.cfg — valid JSON pointing to cached NDK and apktool JAR
           printf '{\n  "ndk_dir": "%s",\n  "apktool": "%s"\n}\n' \
@@ -159,7 +160,7 @@ jobs:
 
           echo "=== dcc.cfg ==="
           cat ~/dex2c/dcc.cfg
-          bash ~/tools/apktool --version
+          bash ~/dex2c/tools/apktool --version
 
       - name: Run Dex2C protection
         run: |
