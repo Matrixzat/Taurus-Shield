@@ -40,7 +40,6 @@ jobs:
               for n in names[:10]:
                   print(f"  {n}")
 
-              # ── Detect slim zip (app pre-extracted libil2cpp.so + metadata at root) ──
               slim_so   = "libil2cpp.so"        if "libil2cpp.so"        in names else None
               slim_meta = "global-metadata.dat" if "global-metadata.dat" in names else None
 
@@ -76,16 +75,44 @@ jobs:
               print(f"  il2cpp/{f}  {sz//1024} KB")
           EOF
 
+      # ── Detect metadata version (logged in summary, drives fallback logic) ─
+      - name: Detect metadata version
+        id: meta
+        run: |
+          python3 - <<'EOF'
+          import struct, sys
+
+          with open("il2cpp/global-metadata.dat", "rb") as f:
+              magic = struct.unpack("<I", f.read(4))[0]
+              if magic != 0xFAB11BFA:
+                  print(f"ERROR: Bad magic 0x{magic:08X} — not a Unity global-metadata.dat")
+                  sys.exit(1)
+              version = struct.unpack("<i", f.read(4))[0]
+
+          print(f"Metadata version: {version}")
+          with open("/tmp/meta_version.txt", "w") as f:
+              f.write(str(version))
+
+          # Il2CppDumper supports: 16,19-24,27,29,29.x (stored as 29),31
+          # Cpp2IL covers those + newer (v30+, v39, etc.)
+          dumper_known = {16, 19, 20, 21, 22, 23, 24, 27, 29, 31}
+          needs_cpp2il = version not in dumper_known
+          print(f"Needs Cpp2IL fallback: {needs_cpp2il}")
+          EOF
+
+          VERSION=$(cat /tmp/meta_version.txt)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Metadata version: $VERSION"
+
       - name: Install .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
-      # ── Il2CppDumper cache ────────────────────────────────────────────────
-      # Check the latest release tag ONCE and use it as the cache key.
-      # Cache hit  → skip the 28 MB download entirely (saves ~15 s per run).
-      # Cache miss → download, extract, chmod, then cache for next run.
-      # The cache is invalidated automatically when a new release is tagged.
+      # ════════════════════════════════════════════════════════════════════════
+      # PRIMARY: Il2CppDumper v6.7.46 — handles metadata v16 / v19–v24 /
+      #          v27 / v29 / v29.x / v31  (Unity 5.x → 2022.x)
+      # ════════════════════════════════════════════════════════════════════════
       - name: Get Il2CppDumper version
         id: il2cpp_ver
         run: |
@@ -95,10 +122,7 @@ jobs:
             TAG=$(curl -s "https://api.github.com/repos/AndnixSH/Il2CppDumper/releases?per_page=5" \
               | python3 -c "import sys,json; r=[x for x in json.load(sys.stdin) if x.get('tag_name')]; print(r[0]['tag_name'] if r else '')" 2>/dev/null || true)
           fi
-          if [ -z "$TAG" ]; then
-            TAG="v6.1.0"
-            echo "WARNING: Using fallback tag $TAG"
-          fi
+          [ -z "$TAG" ] && TAG="v6.7.46" && echo "WARNING: Using fallback tag $TAG"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "Il2CppDumper latest: $TAG"
 
@@ -124,27 +148,107 @@ jobs:
       - name: Ensure Il2CppDumper is executable
         run: |
           chmod +x Il2CppDumper/Il2CppDumper 2>/dev/null || chmod +x Il2CppDumper/* 2>/dev/null || true
-          echo "=== Il2CppDumper files ==="
-          ls -la Il2CppDumper/
 
       - name: Run Il2CppDumper
+        id: run_dumper
         run: |
           mkdir -p dump_out
           EXE=$(find Il2CppDumper -maxdepth 1 -type f -name "Il2CppDumper" | head -1)
-          if [ -z "$EXE" ]; then
-            EXE=$(find Il2CppDumper -maxdepth 1 -type f ! -name "*.dll" ! -name "*.so" ! -name "*.json" | head -1)
-          fi
+          [ -z "$EXE" ] && EXE=$(find Il2CppDumper -maxdepth 1 -type f ! -name "*.dll" ! -name "*.so" ! -name "*.json" | head -1)
           echo "Running: $EXE"
           "$EXE" il2cpp/libil2cpp.so il2cpp/global-metadata.dat dump_out/ 2>&1 | tee dumper_output.txt || true
+
+          if grep -q "not a supported version" dumper_output.txt; then
+            VER=$(grep -oP 'not a supported version\[\K[^\]]+' dumper_output.txt | head -1)
+            echo "Il2CppDumper does not support metadata v${VER} — switching to Cpp2IL"
+            echo "needs_cpp2il=true"  >> $GITHUB_OUTPUT
+          else
+            echo "needs_cpp2il=false" >> $GITHUB_OUTPUT
+          fi
+
           echo "=== dump_out contents ==="
           ls -la dump_out/ 2>/dev/null || echo "(empty)"
 
-      # ── Recover any missing script files from script.json ────────────────────
-      # Il2CppDumper sometimes throws an exception after writing dump.cs /
-      # script.json / stringliteral.json but before it writes ida.py,
-      # ida_with_struct.py, ghidra.py, and il2cpp.h.
-      # When script.json is present we regenerate those files ourselves so the
-      # user always gets every available output.
+      # ════════════════════════════════════════════════════════════════════════
+      # FALLBACK: Cpp2IL pre-release.21 — handles ALL versions including
+      #           v29.2, v39 (Unity 2023.x / Unity 6) and anything newer.
+      #           Only runs when Il2CppDumper reports unsupported version.
+      # ════════════════════════════════════════════════════════════════════════
+      - name: Restore Cpp2IL cache
+        id: cache_cpp2il
+        if: steps.run_dumper.outputs.needs_cpp2il == 'true'
+        uses: actions/cache@v4
+        with:
+          path: Cpp2IL-bin
+          key: cpp2il-linux-2022.1.0-pre-release.21
+
+      - name: Download Cpp2IL
+        if: steps.run_dumper.outputs.needs_cpp2il == 'true' && steps.cache_cpp2il.outputs.cache-hit != 'true'
+        run: |
+          CPP2IL_TAG="2022.1.0-pre-release.21"
+          URL="https://github.com/SamboyCoding/Cpp2IL/releases/download/${CPP2IL_TAG}/Cpp2IL-${CPP2IL_TAG}-Linux"
+          echo "Downloading Cpp2IL $CPP2IL_TAG…"
+          mkdir -p Cpp2IL-bin
+          curl -L "$URL" -o Cpp2IL-bin/Cpp2IL --progress-bar
+          chmod +x Cpp2IL-bin/Cpp2IL
+          echo "=== Cpp2IL binary ready ==="
+          ls -lh Cpp2IL-bin/
+
+      - name: Run Cpp2IL
+        if: steps.run_dumper.outputs.needs_cpp2il == 'true'
+        run: |
+          echo "Running Cpp2IL for metadata v${{ steps.meta.outputs.version }}..."
+
+          # Try direct bin-mode flags first (pre-release.19+)
+          mkdir -p cpp2il_raw
+          ./Cpp2IL-bin/Cpp2IL \
+            --il2cpp-bin il2cpp/libil2cpp.so \
+            --metadata   il2cpp/global-metadata.dat \
+            --output-root cpp2il_raw \
+            --use-processor dumper \
+            2>&1 | tee cpp2il_output.txt || true
+
+          # If --il2cpp-bin not recognised, fall back to game-path structure
+          if grep -qi "unrecognized option\|Unknown option\|il2cpp-bin" cpp2il_output.txt && \
+             ! find cpp2il_raw -name "dump.cs" | grep -q .; then
+            echo "Retrying with --game-path structure…"
+            mkdir -p gpath/GameData_Data/il2cpp_data/Metadata gpath/GameData_Data/Plugins
+            cp il2cpp/global-metadata.dat gpath/GameData_Data/il2cpp_data/Metadata/
+            cp il2cpp/libil2cpp.so        gpath/GameData_Data/Plugins/
+            touch gpath/GameData.exe
+            ./Cpp2IL-bin/Cpp2IL \
+              --game-path gpath \
+              --exe-name  GameData \
+              --output-root cpp2il_raw \
+              --use-processor dumper \
+              2>&1 | tee -a cpp2il_output.txt || true
+          fi
+
+          # Append Cpp2IL log to dumper_output.txt
+          cat cpp2il_output.txt >> dumper_output.txt
+
+          # Normalise: Cpp2IL places dump.cs under a sub-folder — flatten to dump_out/
+          mkdir -p dump_out
+          DUMPCS=$(find cpp2il_raw -name "dump.cs" 2>/dev/null | head -1)
+          if [ -n "$DUMPCS" ]; then
+            cp "$DUMPCS" dump_out/dump.cs
+            echo "Copied dump.cs from $DUMPCS"
+          else
+            echo "WARNING: dump.cs not found in Cpp2IL output"
+          fi
+
+          # Copy all other output files (ida.py, ghidra.py, il2cpp.h, script.json, etc.)
+          for fname in ida.py ida_with_struct.py ghidra.py il2cpp.h script.json stringliteral.json; do
+            SRC=$(find cpp2il_raw -name "$fname" 2>/dev/null | head -1)
+            [ -n "$SRC" ] && cp "$SRC" "dump_out/$fname" && echo "Copied $fname"
+          done
+
+          echo "=== dump_out after Cpp2IL ==="
+          ls -la dump_out/
+
+      # ════════════════════════════════════════════════════════════════════════
+      # COMMON: recover + parse + upload (unchanged)
+      # ════════════════════════════════════════════════════════════════════════
       - name: Recover missing script files from script.json
         run: |
           python3 - <<'PYEOF'
@@ -158,8 +262,6 @@ jobs:
           with open(sj, encoding="utf-8") as f:
               raw = json.load(f)
 
-          # Normalise: handle both dict entries {"Address":…,"Name":…}
-          # and any non-dict format — skip non-dicts gracefully.
           entries = [e for e in (raw if isinstance(raw, list) else []) if isinstance(e, dict)]
           print(f"script.json loaded: {len(raw)} raw / {len(entries)} usable dict entries")
 
@@ -179,7 +281,6 @@ jobs:
                   "        idc.set_name(ea, n, idc.SN_CHECK)\n\n"
               )
 
-          # ── ida.py ────────────────────────────────────────────────────────────
           if not os.path.exists("dump_out/ida.py"):
               hdr   = _ida_header("Il2CppDumper/ida.py")
               lines = [hdr, "method_dict = {\n"]
@@ -195,7 +296,6 @@ jobs:
           else:
               print("dump_out/ida.py already exists — skipping")
 
-          # ── ida_with_struct.py ────────────────────────────────────────────────
           if not os.path.exists("dump_out/ida_with_struct.py"):
               hdr   = _ida_header("Il2CppDumper/ida_with_struct.py")
               lines = [hdr, "method_dict = {\n"]
@@ -211,7 +311,6 @@ jobs:
           else:
               print("dump_out/ida_with_struct.py already exists — skipping")
 
-          # ── ghidra.py ─────────────────────────────────────────────────────────
           if not os.path.exists("dump_out/ghidra.py"):
               if os.path.exists("Il2CppDumper/ghidra.py"):
                   with open("Il2CppDumper/ghidra.py", encoding="utf-8") as f:
@@ -252,9 +351,9 @@ jobs:
           if os.path.exists("dumper_output.txt"):
               with open("dumper_output.txt") as f:
                   out = f.read().strip()
-              print("=== Il2CppDumper output ===")
+              print("=== Dumper output ===")
               print(out[-3000:] if len(out) > 3000 else out)
-              print("===========================")
+              print("=====================")
 
           dump_file = "dump_out/dump.cs"
           if not os.path.exists(dump_file):
@@ -269,7 +368,7 @@ jobs:
               print(f"dump_out contains: {out_files}")
               dumper_log = open("dumper_output.txt").read() if os.path.exists("dumper_output.txt") else "no log"
               error_json = {
-                  "error": "Il2CppDumper produced no output",
+                  "error": "Dumper produced no output",
                   "dump_out_files": out_files,
                   "dumper_log": dumper_log[-2000:],
                   "total_methods": 0, "interesting_methods": [], "all_methods": []
@@ -354,6 +453,7 @@ jobs:
             dump_out/**
             !dump_out/DummyDlls/**
           retention-days: 7
+
       - name: Delete input asset
         run: |
           curl -s -L -X DELETE \
@@ -363,9 +463,17 @@ jobs:
 
       - name: Summary
         run: |
+          META_VER="${{ steps.meta.outputs.version }}"
+          USED_CPP2IL="${{ steps.run_dumper.outputs.needs_cpp2il }}"
+          if [ "$USED_CPP2IL" = "true" ]; then
+            TOOL="Cpp2IL pre-release.21 (metadata v${META_VER} — Unity 2023+/Unity 6)"
+          else
+            TOOL="Il2CppDumper ${{ steps.il2cpp_ver.outputs.tag }} (metadata v${META_VER})"
+          fi
           echo "## Game Dump Complete ✅" >> $GITHUB_STEP_SUMMARY
           echo "- **Job ID:** ${{ inputs.job_id }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Il2CppDumper:** ${{ steps.il2cpp_ver.outputs.tag }} (cache hit: ${{ steps.cache_dumper.outputs.cache-hit }})" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tool used:** $TOOL" >> $GITHUB_STEP_SUMMARY
+          echo "- **Metadata version:** v${META_VER}" >> $GITHUB_STEP_SUMMARY
           echo "- **Artifact:** game-dump-${{ inputs.job_id }} (7-day retention)" >> $GITHUB_STEP_SUMMARY
           [ -f offsets.json ] && echo "- **offsets.json size:** $(du -sh offsets.json | cut -f1)" >> $GITHUB_STEP_SUMMARY || true
           echo "- **dump_out files:** $(ls dump_out/ 2>/dev/null | tr '\n' ' ' || echo empty)" >> $GITHUB_STEP_SUMMARY
