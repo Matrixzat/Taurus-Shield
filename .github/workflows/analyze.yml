@@ -9,6 +9,10 @@ on:
       job_id:
         description: 'Unique job ID for artifact naming'
         required: true
+      no_analysis:
+        description: 'Skip code analysis (faster, avoids crashes on some snapshots)'
+        required: false
+        default: 'false'
 
 jobs:
   analyze:
@@ -53,14 +57,10 @@ jobs:
           LIB_DIR=$(cd "$(dirname "$SO_PATH")" && pwd)
           echo "LIB_DIR=$LIB_DIR" >> $GITHUB_ENV
 
-      # ── Only install what is NOT pre-installed on ubuntu-latest ──────────────
-      # cmake, ninja-build, clang, build-essential, git, python3-pip are all
-      # available by default — no need to install them.
       - name: Install missing system libraries
         run: |
           sudo apt-get install -y --no-install-recommends libicu-dev libcapstone-dev
 
-      # ── Cache pip packages ────────────────────────────────────────────────────
       - name: Cache pip packages
         uses: actions/cache@v4
         with:
@@ -70,7 +70,6 @@ jobs:
       - name: Install Python packages
         run: pip3 install pyelftools requests --quiet
 
-      # ── Get blutter HEAD SHA for cache key (no full clone needed) ────────────
       - name: Get blutter HEAD SHA
         id: blutter-sha
         run: |
@@ -78,10 +77,6 @@ jobs:
           echo "sha=$SHA" >> $GITHUB_OUTPUT
           echo "Blutter SHA: $SHA"
 
-      # ── Restore blutter (clone + compiled Dart binaries) from cache ───────────
-      # Key includes blutter SHA so cache auto-refreshes when blutter updates.
-      # The compiled Dart-version-specific binaries live inside the blutter dir,
-      # so a cache hit means zero compilation on repeat runs with same Dart version.
       - name: Restore blutter cache
         id: blutter-cache
         uses: actions/cache@v4
@@ -97,12 +92,16 @@ jobs:
         run: |
           mkdir -p blutter_output
           echo "Analyzing: $LIB_DIR"
+          NO_ANALYSIS_FLAG=""
+          if [ "${{ inputs.no_analysis }}" = "true" ]; then
+            NO_ANALYSIS_FLAG="--no-analysis"
+            echo "Running with --no-analysis flag"
+          fi
           cd blutter
-          python3 blutter.py "$LIB_DIR" "$GITHUB_WORKSPACE/blutter_output" 2>&1 | tee "$GITHUB_WORKSPACE/blutter_run.log"
+          python3 blutter.py $NO_ANALYSIS_FLAG "$LIB_DIR" "$GITHUB_WORKSPACE/blutter_output" 2>&1 | tee "$GITHUB_WORKSPACE/blutter_run.log"
           exit ${PIPESTATUS[0]}
         timeout-minutes: 35
 
-      # ── Save blutter cache after first build (includes compiled binaries) ─────
       - name: Save blutter cache
         if: steps.blutter-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -132,3 +131,4 @@ jobs:
           name: error-${{ inputs.job_id }}
           path: blutter_run.log
           retention-days: 1
+
