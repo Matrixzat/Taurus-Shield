@@ -73,9 +73,11 @@ jobs:
       - name: Get blutter HEAD SHA
         id: blutter-sha
         run: |
-          SHA=$(git ls-remote https://github.com/worawit/blutter.git HEAD | cut -f1 | cut -c1-12)
+          set -euo pipefail
+          SHA=$(git ls-remote https://github.com/worawit/blutter.git HEAD | cut -f1)
+          test "${#SHA}" -eq 40
           echo "sha=$SHA" >> $GITHUB_OUTPUT
-          echo "Blutter SHA: $SHA"
+          echo "Blutter SHA: ${SHA:0:12}"
 
       - name: Restore blutter cache
         id: blutter-cache

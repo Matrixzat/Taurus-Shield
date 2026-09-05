@@ -6,7 +6,7 @@ on:
       dart_versions:
         description: 'Comma-separated Dart versions (e.g. 3.4.4,3.5.4,3.6.2)'
         required: false
-        default: '3.3.4,3.4.4,3.5.4,3.6.2,3.7.2,3.11.1'
+        default: '3.3.4,3.4.4,3.5.4,3.6.2,3.7.2,3.11.5,3.13.3'
   push:
     tags:
       - 'blutter-*'
@@ -26,7 +26,8 @@ jobs:
           - '3.5.4'
           - '3.6.2'
           - '3.7.2'
-          - '3.11.1'
+          - '3.11.5'
+          - '3.13.3'
 
     steps:
       - name: Checkout
@@ -60,8 +61,13 @@ jobs:
 
       - name: Clone blutter
         run: |
+          set -euo pipefail
+          SHA=$(git ls-remote https://github.com/worawit/blutter.git HEAD | cut -f1)
+          test "${#SHA}" -eq 40
           git clone --depth=1 https://github.com/worawit/blutter.git blutter
-          echo "Blutter cloned"
+          git -C blutter fetch --depth=1 origin "$SHA"
+          git -C blutter checkout --detach "$SHA"
+          echo "Blutter revision: ${SHA:0:12}"
           ls blutter/
 
       - name: Build for Dart ${{ matrix.dart_version }}
