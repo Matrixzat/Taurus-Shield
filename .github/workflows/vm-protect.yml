@@ -107,6 +107,20 @@ jobs:
             echo "NO — AndroidManifest.xml missing! Not a standard Android APK."
             exit 1
           fi
+          echo "=== Native ABI check ==="
+          ABIS=$(unzip -Z1 "$APK_ABS" 2>/dev/null \
+            | sed -nE 's#^lib/([^/]+)/[^/]+\.so$#\1#p' \
+            | sort -u)
+          if [ -z "$ABIS" ]; then
+            echo "No native libraries found; NMMP will use the ARM64-only config."
+          else
+            printf '%s\n' "$ABIS"
+            if ! printf '%s\n' "$ABIS" | grep -qx "arm64-v8a"; then
+              echo "ERROR: input APK has no arm64-v8a native library slice."
+              echo "NMMP cannot turn a 32-bit-only native APK into ARM64."
+              exit 1
+            fi
+          fi
 
       - name: Log protection mode
         if: env.RULES_PATH == ''
@@ -200,6 +214,49 @@ jobs:
             -O vm-protect.jar
           ls -lh vm-protect.jar
 
+      - name: Configure NMMP for Android ARM64
+        run: |
+          JAR_DIR="$(dirname "$GITHUB_WORKSPACE/vm-protect.jar")"
+          mkdir -p "$JAR_DIR/tools"
+
+          # NMMP reads this file beside vm-protect.jar. Without it, the
+          # bundled default enables armeabi-v7a and disables arm64-v8a.
+          cat > "$JAR_DIR/tools/config.json" <<EOF
+          {
+            "abi": {
+              "armeabi-v7a": false,
+              "arm64-v8a": true,
+              "x86": false,
+              "x86_64": false
+            },
+            "environment": {
+              "sdk_path": "$ANDROID_SDK_HOME",
+              "cmake_path": "$CMAKE_BIN",
+              "ndk_path": "$ANDROID_NDK_HOME",
+              "ndk_toolchains": "/toolchains/llvm/prebuilt/",
+              "ndk_abi": "linux-x86_64",
+              "ndk_strip": "/bin/llvm-strip"
+            }
+          }
+          EOF
+
+          python3 - "$JAR_DIR/tools/config.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          config_path = Path(sys.argv[1])
+          config = json.loads(config_path.read_text())
+          abi = config["abi"]
+          assert abi == {
+              "armeabi-v7a": False,
+              "arm64-v8a": True,
+              "x86": False,
+              "x86_64": False,
+          }, abi
+          print("NMMP ABI configuration verified: arm64-v8a only")
+          PY
+
       - name: Run VM Protect
         timeout-minutes: 50
         run: |
@@ -241,6 +298,20 @@ jobs:
           cp "$PROTECT_APK" vmprotect_output/protected.apk
           echo "Protected APK: $(wc -c < vmprotect_output/protected.apk) bytes"
           find vmprotect_output/ -type f | sort
+
+      - name: Verify protected APK is ARM64
+        run: |
+          APK="vmprotect_output/protected.apk"
+          echo "=== Native libraries in protected APK ==="
+          unzip -Z1 "$APK" | grep '^lib/.*\.so$' | sort || true
+
+          if ! unzip -Z1 "$APK" | grep -q '^lib/arm64-v8a/libnmmp\.so$'; then
+            echo "ERROR: protected APK is missing lib/arm64-v8a/libnmmp.so"
+            echo "NMMP did not produce an ARM64 runtime."
+            exit 1
+          fi
+
+          echo "ARM64 NMMP runtime verified: lib/arm64-v8a/libnmmp.so"
 
       - name: Sign APK
         if: inputs.sign_apk == 'true'
