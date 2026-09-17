@@ -1,0 +1,299 @@
+name: NMMP Debug Trace
+
+# This workflow is intentionally separate from vm-protect.yml.
+# It observes the protected APK and never replaces or uploads the normal
+# protection result.
+on:
+  workflow_dispatch:
+    inputs:
+      asset_id:
+        description: "Release asset ID containing the APK or APK bundle"
+        required: true
+        type: string
+      job_id:
+        description: "Unique ID used for the debug artifact name"
+        required: true
+        type: string
+      run_emulator:
+        description: "Boot an Android emulator and collect a smoke log"
+        required: false
+        default: false
+        type: boolean
+      package_name:
+        description: "Optional package name to launch in the emulator"
+        required: false
+        default: ""
+        type: string
+      emulator_api:
+        description: "Android API level for the optional emulator"
+        required: false
+        default: "35"
+        type: string
+
+jobs:
+  static-debug:
+    name: Static NMMP evidence
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download release asset
+        env:
+          ASSET_ID: ${{ inputs.asset_id }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/octet-stream" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/releases/assets/${ASSET_ID}" \
+            -o input_asset
+          test -s input_asset
+          sha256sum input_asset | tee input_asset.sha256
+          file input_asset
+
+      - name: Install static-analysis tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            binutils file unzip python3
+
+      - name: Extract APK without modifying the input
+        run: |
+          set -euo pipefail
+          mkdir -p extracted
+          if zipinfo -1 input_asset 2>/dev/null | grep -Eiq '\.apk$'; then
+            unzip -q -o input_asset -d extracted
+          else
+            cp input_asset extracted/input.apk
+          fi
+
+          APK=$(find extracted -type f -iname '*.apk' -print -quit)
+          test -n "$APK"
+          cp "$APK" extracted/analysis.apk
+          echo "APK_PATH=extracted/analysis.apk" >> "$GITHUB_ENV"
+          echo "APK path: $APK"
+          unzip -Z1 "$APK" | sort > debug_zip_entries.txt
+
+      - name: Collect APK and DEX evidence
+        run: |
+          set -euo pipefail
+          mkdir -p nmmp-debug/dex
+          APK="$GITHUB_WORKSPACE/$APK_PATH"
+
+          {
+            echo "=== APK ==="
+            file "$APK"
+            sha256sum "$APK"
+            stat -c 'bytes=%s' "$APK"
+            echo
+            echo "=== ZIP entries ==="
+            cat debug_zip_entries.txt
+          } > nmmp-debug/apk.txt
+
+          while IFS= read -r dex; do
+            name=$(basename "$dex")
+            unzip -p "$APK" "$dex" | sha256sum \
+              > "nmmp-debug/dex/${name}.sha256"
+          done < <(grep -E '^classes([0-9]+)?\.dex$' debug_zip_entries.txt || true)
+
+      - name: Collect native ELF and dispatch evidence
+        run: |
+          set -euo pipefail
+          mkdir -p nmmp-debug/native
+          APK="$GITHUB_WORKSPACE/$APK_PATH"
+          unzip -q -o "$APK" 'lib/*/*.so' -d extracted/native || true
+
+          find extracted/native -type f -name '*.so' -print0 |
+          while IFS= read -r -d '' so; do
+            rel=${so#extracted/native/}
+            safe=$(printf '%s' "$rel" | tr '/ ' '__')
+            {
+              echo "=== $rel ==="
+              file "$so"
+              sha256sum "$so"
+              echo
+              echo "--- ELF header ---"
+              readelf -h "$so" || true
+              echo
+              echo "--- sections ---"
+              readelf -S --wide "$so" || true
+              echo
+              echo "--- dynamic symbols ---"
+              readelf -Ws "$so" || true
+              echo
+              echo "--- relocations ---"
+              readelf -r --wide "$so" || true
+              echo
+              echo "--- NMMP strings ---"
+              strings -a "$so" |
+                grep -Ei 'nmmp|nmmvm|vmInterpret|cacheInitial|gVm|resolver|opcode' ||
+                true
+            } > "nmmp-debug/native/${safe}.txt"
+          done
+
+          python3 - "$GITHUB_WORKSPACE/extracted/native" \
+            "$GITHUB_WORKSPACE/nmmp-debug/dispatch_tables.json" <<'PY'
+          import json
+          import re
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          output = Path(sys.argv[2])
+          relative = re.compile(
+              r"^\s*([0-9a-fA-F]+)\s+\S+\s+R_AARCH64_RELATIVE\s+"
+              r"([0-9a-fA-F]+)"
+          )
+          result = {}
+
+          for so in sorted(root.rglob("*.so")):
+              try:
+                  text = subprocess.check_output(
+                      ["readelf", "-r", "--wide", str(so)],
+                      text=True,
+                      stderr=subprocess.STDOUT,
+                  )
+              except subprocess.CalledProcessError as exc:
+                  result[str(so.relative_to(root))] = {"error": exc.output}
+                  continue
+
+              relocations = {}
+              for line in text.splitlines():
+                  match = relative.match(line)
+                  if match:
+                      relocations[int(match.group(1), 16)] = int(
+                          match.group(2), 16
+                      )
+
+              tables = []
+              for base in sorted(relocations):
+                  window = [base + 8 * index for index in range(256)]
+                  if all(location in relocations for location in window):
+                      tables.append({
+                          "file_offset_or_vaddr": f"0x{base:x}",
+                          "entries": [
+                              {
+                                  "encoded_byte": index,
+                                  "native_target_addend":
+                                      f"0x{relocations[base + 8 * index]:x}",
+                              }
+                              for index in range(256)
+                          ],
+                      })
+
+              result[str(so.relative_to(root))] = {
+                  "relative_relocation_count": len(relocations),
+                  "complete_256_entry_tables": tables,
+                  "interpretation":
+                      "Targets identify native handlers only; they are not "
+                      "DEX opcode assignments.",
+              }
+
+          output.write_text(json.dumps(result, indent=2) + "\n")
+          PY
+
+      - name: Write analysis summary
+        run: |
+          set -euo pipefail
+          {
+            echo "# NMMP debug summary"
+            echo
+            echo "- Repository: \`${GITHUB_REPOSITORY}\`"
+            echo "- Workflow run: \`${GITHUB_RUN_ID}\`"
+            echo "- Input asset ID: \`${{ inputs.asset_id }}\`"
+            echo
+            echo "## Files"
+            find nmmp-debug -type f -printf '%p\n' | sort
+            echo
+            echo "## Dispatch tables"
+            python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          data = json.loads(Path("nmmp-debug/dispatch_tables.json").read_text())
+          for name, item in data.items():
+              tables = item.get("complete_256_entry_tables", [])
+              print(f"- {name}: {len(tables)} complete 256-entry table(s)")
+          PY
+            echo
+            echo "A dispatch table maps encoded bytes to native handler targets."
+            echo "It does not by itself prove the original DEX opcode."
+          } > nmmp-debug/summary.md
+
+      - name: Upload static debug bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: nmmp-debug-static-${{ inputs.job_id }}
+          path: nmmp-debug/
+          if-no-files-found: error
+          retention-days: 7
+
+  emulator-smoke:
+    name: Optional Android runtime smoke trace
+    if: ${{ inputs.run_emulator }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: read
+
+    steps:
+      - name: Download release asset
+        env:
+          ASSET_ID: ${{ inputs.asset_id }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/octet-stream" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/releases/assets/${ASSET_ID}" \
+            -o input_asset
+          mkdir -p extracted
+          if zipinfo -1 input_asset 2>/dev/null | grep -Eiq '\.apk$'; then
+            unzip -q -o input_asset -d extracted
+          else
+            cp input_asset extracted/input.apk
+          fi
+          APK=$(find extracted -type f -iname '*.apk' -print -quit)
+          test -n "$APK"
+          cp "$APK" analysis.apk
+
+      - name: Boot emulator and collect runtime logs
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ inputs.emulator_api }}
+          arch: x86_64
+          target: google_apis
+          force-avd-creation: true
+          disable-animations: true
+          emulator-options: -no-window -no-audio -no-boot-anim
+          script: |
+            mkdir -p emulator-debug
+            adb devices -l | tee emulator-debug/devices.txt
+            adb shell getprop | sort > emulator-debug/getprop.txt
+            adb install -r analysis.apk 2>&1 | tee emulator-debug/install.txt || true
+
+            if [ -n "${{ inputs.package_name }}" ]; then
+              adb shell monkey -p "${{ inputs.package_name }}" 1 \
+                2>&1 | tee emulator-debug/launch.txt || true
+            else
+              echo "No package_name supplied; launch was skipped." \
+                | tee emulator-debug/launch.txt
+            fi
+
+            sleep 8
+            adb logcat -d -v threadtime > emulator-debug/logcat.txt || true
+            adb shell dumpsys package "${{ inputs.package_name }}" \
+              > emulator-debug/package.txt 2>&1 || true
+
+      - name: Upload emulator debug bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: nmmp-debug-emulator-${{ inputs.job_id }}
+          path: emulator-debug/
+          if-no-files-found: warn
+          retention-days: 7
