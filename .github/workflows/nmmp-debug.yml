@@ -27,7 +27,7 @@ on:
       emulator_api:
         description: "Android API level for the optional emulator"
         required: false
-        default: "35"
+        default: "30"
         type: string
 
 jobs:
@@ -120,7 +120,7 @@ jobs:
               "armeabi-v7a": true,
               "arm64-v8a": true,
               "x86": false,
-              "x86_64": false
+              "x86_64": true
             },
             "environment": {
               "sdk_path": "${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}",
@@ -383,10 +383,15 @@ jobs:
         with:
           api-level: ${{ inputs.emulator_api }}
           arch: x86_64
-          target: google_apis
+          target: default
           force-avd-creation: true
+          cores: 2
+          ram-size: 2048M
+          heap-size: 512M
+          disk-size: 2048M
+          disable-spellchecker: true
           disable-animations: true
-          emulator-options: -no-window -no-audio -no-boot-anim
+          emulator-options: -no-window -no-audio -no-boot-anim -gpu swiftshader_indirect
           script: |
             mkdir -p emulator-debug
             adb devices -l | tee emulator-debug/devices.txt
