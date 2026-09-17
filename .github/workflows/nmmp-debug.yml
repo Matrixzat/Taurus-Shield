@@ -175,7 +175,33 @@ jobs:
           '''
           if records_old not in text:
               raise SystemExit("recover_nmmp.py JNI record block not found")
-          path.write_text(text.replace(records_old, records_new, 1), encoding="utf-8")
+          text = text.replace(records_old, records_new, 1)
+          json_old = '''def r2_json(so: Path, command: str):
+              out = run(["r2", "-e", "bin.relocs.apply=true", "-q",
+                         "-c", f"{command}; q", str(so)])
+              return json.loads(out)
+          '''
+          json_new = '''def r2_json(so: Path, command: str):
+              out = run(["r2", "-e", "bin.relocs.apply=true", "-q",
+                         "-c", f"{command}; q", str(so)])
+              try:
+                  return json.loads(out)
+              except json.JSONDecodeError:
+                  decoder = json.JSONDecoder()
+                  for start, marker in enumerate(out):
+                      if marker not in "[{":
+                          continue
+                      try:
+                          value, _ = decoder.raw_decode(out[start:])
+                      except json.JSONDecodeError:
+                          continue
+                      if isinstance(value, (list, dict)):
+                          return value
+                  raise
+          '''
+          if json_old not in text:
+              raise SystemExit("recover_nmmp.py r2_json block not found")
+          path.write_text(text.replace(json_old, json_new, 1), encoding="utf-8")
           PY
 
       - name: Download release asset
