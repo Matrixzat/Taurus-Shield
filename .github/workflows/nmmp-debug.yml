@@ -92,6 +92,23 @@ jobs:
                       xrefs.extend(r2_json(so, f"aaa; axtj @ {import_name}"))
                   except (RuntimeError, ValueError, KeyError):
                       pass
+              try:
+                  symbols = r2_json(so, "aaa; isj")
+              except (RuntimeError, ValueError, KeyError):
+                  symbols = []
+              for symbol in symbols:
+                  name = str(symbol.get("name", ""))
+                  if not name.endswith("vmInterpret"):
+                      continue
+                  address = symbol.get("vaddr") or symbol.get("paddr")
+                  if not address:
+                      continue
+                  try:
+                      xrefs.extend(r2_json(
+                          so, f"aaa; axtj @ 0x{int(address):x}"
+                      ))
+                  except (RuntimeError, ValueError, KeyError):
+                      pass
               wrapper_addresses = set()
               for xref in xrefs:
                   function_addr = xref.get("fcn_addr")
