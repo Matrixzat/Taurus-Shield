@@ -210,7 +210,20 @@ jobs:
           '''
           if pdf_old not in text:
               raise SystemExit("recover_nmmp.py pdfj block not found")
-          path.write_text(text.replace(pdf_old, pdf_new, 1), encoding="utf-8")
+          text = text.replace(pdf_old, pdf_new, 1)
+          loop_old = '''    for addr in wrappers:
+                  item = recover_wrapper(so, addr, sections) or {}
+                  item["registrations"] = by_wrapper.get(addr, [])
+          '''
+          loop_new = '''    for addr in wrappers:
+                  item = recover_wrapper(so, addr, sections)
+                  if not item:
+                      continue
+                  item["registrations"] = by_wrapper.get(addr, [])
+          '''
+          if loop_old not in text:
+              raise SystemExit("recover_nmmp.py wrapper loop block not found")
+          path.write_text(text.replace(loop_old, loop_new, 1), encoding="utf-8")
           PY
 
       - name: Download release asset
