@@ -389,13 +389,26 @@ jobs:
                       ]
                   except (OSError, AttributeError):
                       canonical_names = []
-                  if canonical_names != [name for name, _ in entries]:
+                  generated_names = [name for name, _ in entries]
+                  generated_values = [value for _, value in entries]
+                  if (
+                      len(canonical_names) != 256
+                      or set(canonical_names) != set(generated_names)
+                      or generated_values != list(range(256))
+                  ):
                       continue
+                  standard_by_name = {
+                      name: standard
+                      for standard, name in enumerate(canonical_names)
+                  }
+                  encoded_to_standard = [
+                      standard_by_name[name] for name in generated_names
+                  ]
                   add_candidate(
                       path,
                       "Opcode",
-                      [value for _, value in entries],
-                      "standard_to_encoded_opcode_enum",
+                      encoded_to_standard,
+                      "encoded_to_standard_opcode_enum",
                       "opcode_enum",
                   )
 
