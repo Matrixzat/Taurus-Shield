@@ -39,6 +39,11 @@ jobs:
       contents: read
 
     steps:
+      - name: Checkout static recovery tools
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - name: Download release asset
         env:
           ASSET_ID: ${{ inputs.asset_id }}
@@ -58,7 +63,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            binutils file unzip python3 openjdk-17-jdk wget ninja-build
+            binutils file unzip python3 openjdk-17-jdk wget ninja-build radare2
 
       - name: Extract APK without modifying the input
         run: |
@@ -187,6 +192,397 @@ jobs:
           if [ -n "${MAPPING_PATH:-}" ]; then
             cp "$MAPPING_PATH" nmmp-debug/input/mapping.txt
           fi
+
+      - name: Preserve generated dex2c mapping evidence
+        run: |
+          set -euo pipefail
+          DEX2C="$GITHUB_WORKSPACE/extracted/build/dex2c"
+          if [ ! -d "$DEX2C" ]; then
+            echo "ERROR: protector did not leave extracted/build/dex2c"
+            echo "Generated build directories found:"
+            find "$GITHUB_WORKSPACE/extracted" -type d -path '*/build/*' \
+              -print | sort || true
+            echo "Top-level generated files:"
+            find "$GITHUB_WORKSPACE/extracted" -maxdepth 5 -type f \
+              -print | sort | head -200 || true
+            exit 1
+          fi
+
+          mkdir -p nmmp-debug/protected/generated
+          cp -a "$DEX2C" nmmp-debug/protected/generated/dex2c
+          find nmmp-debug/protected/generated/dex2c -type f -print0 |
+            sort -z |
+            while IFS= read -r -d '' file; do
+              sha256sum "$file"
+            done > nmmp-debug/protected/generated/dex2c.sha256
+
+          echo "DEX2C_ROOT=$DEX2C" >> "$GITHUB_ENV"
+          echo "Generated dex2c files preserved:"
+          find nmmp-debug/protected/generated/dex2c -type f -print | sort
+
+      - name: Extract exact generated opcode permutation
+        run: |
+          set -euo pipefail
+          python3 - "$DEX2C_ROOT" \
+            "$GITHUB_WORKSPACE/nmmp-debug/protected/opcode_permutation.json" \
+            "$GITHUB_WORKSPACE/nmmp-debug/protected/handler_mapping_generated.json" <<'PY'
+          import ast
+          import json
+          import re
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1]).resolve()
+          permutation_output = Path(sys.argv[2])
+          mapping_output = Path(sys.argv[3])
+
+          # RandomInstructionRewriter preserves NOP and the unused DEX 039
+          # holes.  A generated candidate that violates this is not NMMP's
+          # opcode permutation, even if it happens to contain 256 integers.
+          valid_slots = {
+              value for value in range(1, 256)
+              if value <= 0x3D or 0x44 <= value <= 0x78
+              or 0x7B <= value <= 0xF2 or 0xFA <= value <= 0xFF
+          }
+          fixed_slots = {0} | (set(range(256)) - valid_slots - {0})
+          integer = re.compile(r"(?<![A-Za-z0-9_])(?:0[xX][0-9A-Fa-f]+|[0-9]+)(?![A-Za-z0-9_])")
+          declaration = re.compile(
+              r"(?P<kind>\b(?:const|static|constexpr|unsigned|uint8_t|"
+              r"uint16_t|uint32_t|int|short|char)\b[^;=\n]{0,160}?)"
+              r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*"
+              r"(?:\[\s*(?:256)?\s*\])?\s*=\s*\{(?P<body>.*?)\}",
+              re.IGNORECASE | re.DOTALL,
+          )
+
+          def valid(values):
+              return (
+                  len(values) == 256
+                  and sorted(values) == list(range(256))
+                  and values[0] == 0
+                  and all(
+                      (index in valid_slots) == (value in valid_slots)
+                      for index, value in enumerate(values)
+                  )
+                  and all(
+                      values[index] == index
+                      for index in fixed_slots
+                  )
+              )
+
+          def numbers(text):
+              # Remove comments before parsing arrays, but retain all literals
+              # in the initializer. ast.literal_eval handles JSON/Python-like
+              # generated arrays; the regex fallback handles C initializers.
+              text = re.sub(r"/\*.*?\*/", " ", text, flags=re.DOTALL)
+              text = re.sub(r"//.*?$", " ", text, flags=re.MULTILINE)
+              try:
+                  value = ast.literal_eval("[" + text + "]")
+                  if isinstance(value, list) and all(
+                      isinstance(item, int) and not isinstance(item, bool)
+                      for item in value
+                  ):
+                      return value
+              except (SyntaxError, ValueError):
+                  pass
+              return [int(match.group(0), 0) for match in integer.finditer(text)]
+
+          def direction_for(path, symbol, label):
+              text = " ".join((str(path), symbol, label)).lower()
+              if re.search(
+                  r"encoded[_-]?to[_-]?(standard|dex)|decode|inverse|"
+                  r"vm[_-]?to[_-]?(dex|standard)",
+                  text,
+              ):
+                  return "encoded_to_standard"
+              if re.search(
+                  r"standard[_-]?to[_-]?(encoded|vm)|encode|"
+                  r"dex[_-]?to[_-]?vm|randomized|permutation",
+                  text,
+              ):
+                  return "standard_to_encoded"
+              return None
+
+          candidates = []
+
+          def add_candidate(path, symbol, values, label, source_kind):
+              if not valid(values):
+                  return
+              direction = direction_for(path.relative_to(root), symbol, label)
+              if direction is None:
+                  return
+              candidates.append({
+                  "path": str(path.relative_to(root)),
+                  "symbol": symbol or None,
+                  "label": label or None,
+                  "direction": direction,
+                  "values": values,
+                  "source_kind": source_kind,
+              })
+
+          for path in sorted(root.rglob("*")):
+              if not path.is_file() or path.stat().st_size > 4 * 1024 * 1024:
+                  continue
+              try:
+                  text = path.read_text(encoding="utf-8")
+              except (UnicodeDecodeError, OSError):
+                  continue
+
+              # Prefer an explicitly named JSON field when the generated
+              # build emits JSON metadata.
+              try:
+                  document = json.loads(text)
+              except (json.JSONDecodeError, ValueError):
+                  document = None
+              if document is not None:
+                  stack = [("", document)]
+                  while stack:
+                      label, value = stack.pop()
+                      if isinstance(value, dict):
+                          for key, child in value.items():
+                              stack.append((str(key), child))
+                      elif (
+                          isinstance(value, list)
+                          and all(isinstance(item, int) for item in value)
+                      ):
+                          add_candidate(
+                              path, "", value, label, "json"
+                          )
+
+              for match in declaration.finditer(text):
+                  symbol = match.group("name")
+                  label = match.group("kind")
+                  values = numbers(match.group("body"))
+                  add_candidate(path, symbol, values, label, "c_initializer")
+
+          # Same values in multiple generated copies are one source candidate;
+          # different arrays or directions are ambiguous and must stop the job.
+          unique = {}
+          for candidate in candidates:
+              key = (
+                  tuple(candidate["values"]),
+                  candidate["direction"],
+              )
+              unique.setdefault(key, []).append(candidate)
+          if len(unique) != 1:
+              print("ERROR: could not identify one exact generated NMMP permutation")
+              print(f"Validated candidates: {len(candidates)}")
+              for items in unique.values():
+                  for item in items[:5]:
+                      print(
+                          f"  {item['path']}:{item['symbol'] or item['label'] or '<json>'} "
+                          f"direction={item['direction']}"
+                      )
+              if not candidates:
+                  print(
+                      "No direction-labeled 256-entry permutation was found. "
+                      "The generated header may use a new symbol name; preserve "
+                      "the artifact and update the extractor rather than guessing."
+                  )
+              raise SystemExit(1)
+
+          candidate_group = next(iter(unique.values()))
+          candidate = candidate_group[0]
+          raw = candidate["values"]
+          if candidate["direction"] == "encoded_to_standard":
+              encoded_to_standard = raw
+          else:
+              encoded_to_standard = [0] * 256
+              for standard, encoded in enumerate(raw):
+                  encoded_to_standard[encoded] = standard
+
+          if not valid(encoded_to_standard):
+              raise SystemExit(
+                  "generated permutation inversion failed NMMP DEX 039 validation"
+              )
+
+          source_files = sorted(
+              {item["path"] for item in candidate_group}
+          )
+          source = {
+              "path": candidate["path"],
+              "symbol": candidate["symbol"],
+              "label": candidate["label"],
+              "direction": candidate["direction"],
+              "duplicate_source_files": source_files,
+          }
+          permutation = {
+              "schema": "nmmp-generated-opcode-permutation/v1",
+              "dex_version": 39,
+              "source": source,
+              "opcode_permutation": raw,
+              "encoded_to_standard": encoded_to_standard,
+              "validation": {
+                  "entry_count": 256,
+                  "is_bijection": True,
+                  "nop_fixed": encoded_to_standard[0] == 0,
+                  "dex039_holes_fixed": all(
+                      encoded_to_standard[index] == index
+                      for index in fixed_slots
+                  ),
+              },
+          }
+          permutation_output.write_text(
+              json.dumps(permutation, indent=2) + "\n", encoding="utf-8"
+          )
+
+          # restore_dex.py consumes encoded-byte -> standard-opcode assignments.
+          mapping = {
+              "schema": "nmmp-generated-handler-mapping/v1",
+              "source_permutation": str(permutation_output.resolve()),
+              "protected_table": "generated-permutation",
+              "known_assignments": {
+                  str(encoded): standard
+                  for encoded, standard in enumerate(encoded_to_standard)
+              },
+              "entries": [
+                  {
+                      "encoded": f"0x{encoded:02x}",
+                      "standard": f"0x{standard:02x}",
+                      "confidence": "generated-source-exact",
+                  }
+                  for encoded, standard in enumerate(encoded_to_standard)
+              ],
+          }
+          mapping_output.write_text(
+              json.dumps(mapping, indent=2) + "\n", encoding="utf-8"
+          )
+          print(
+              "Exact generated permutation:",
+              candidate["path"],
+              candidate["symbol"] or candidate["label"] or "<json>",
+              candidate["direction"],
+          )
+          print("Restorer mapping:", mapping_output)
+          PY
+          echo "OPCODE_PERMUTATION_JSON=nmmp-debug/protected/opcode_permutation.json" \
+            >> "$GITHUB_ENV"
+          echo "GENERATED_MAPPING_JSON=nmmp-debug/protected/handler_mapping_generated.json" \
+            >> "$GITHUB_ENV"
+
+      - name: Restore DEX with generated permutation
+        run: |
+          set -euo pipefail
+          RECOVERY="$GITHUB_WORKSPACE/nmmp-debug/protected/recovery"
+          RESTORED="$GITHUB_WORKSPACE/nmmp-debug/protected/restored_dex"
+          MAPPING="$GITHUB_WORKSPACE/$GENERATED_MAPPING_JSON"
+          RECOVER_SCRIPT="$GITHUB_WORKSPACE/devirtualizer/runtime/runtime/analysis/protected-apk/recover_nmmp.py"
+          RESTORE_SCRIPT="$GITHUB_WORKSPACE/devirtualizer/runtime/runtime/analysis/protected-apk/restore_dex.py"
+          test -s "$MAPPING"
+          test -f "$RECOVER_SCRIPT"
+          test -f "$RESTORE_SCRIPT"
+
+          rm -rf "$RECOVERY" "$RESTORED"
+          python3 "$RECOVER_SCRIPT" "$GITHUB_WORKSPACE/$PROTECTED_APK" \
+            --output "$RECOVERY"
+          unzip -q -o "$GITHUB_WORKSPACE/$PROTECTED_APK" \
+            'lib/*/libnmmvm.so' -d "$RECOVERY/_apk"
+
+          python3 - "$GITHUB_WORKSPACE" "$RECOVERY" "$RESTORED" "$MAPPING" <<'PY'
+          import json
+          import os
+          import shutil
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          workspace = Path(sys.argv[1])
+          recovered = Path(sys.argv[2])
+          restored = Path(sys.argv[3])
+          generated_mapping = Path(sys.argv[4])
+          runtime = workspace / "devirtualizer/runtime/runtime"
+          analysis = runtime / "analysis/protected-apk"
+          sys.path.insert(0, str(runtime))
+          sys.path.insert(0, str(analysis))
+          import restore_nmmp_termux as pipeline
+
+          dex_root = recovered / "_apk"
+          dexes = pipeline.dex_paths(dex_root)
+          probe = recovered / "probe_smali"
+          probe.mkdir(parents=True, exist_ok=True)
+          for dex in dexes:
+              pipeline.disassemble(dex, probe / dex.stem)
+
+          targets_path = recovered / "native_targets.json"
+          target_count = pipeline.discover_native_targets(
+              dex_root, dexes, probe, targets_path
+          )
+          pipeline.align_recovered_methods(recovered, targets_path)
+
+          mapping_path = recovered / "handler_mapping_generated.json"
+          shutil.copy2(generated_mapping, mapping_path)
+          native_so = recovered / "_apk/lib/arm64-v8a/libnmmp.so"
+          if not native_so.is_file():
+              raise RuntimeError(
+                  "recovery did not extract lib/arm64-v8a/libnmmp.so"
+              )
+
+          restored.mkdir(parents=True, exist_ok=True)
+          command = [
+              sys.executable,
+              str(analysis / "restore_dex.py"),
+              "--dex-dir", str(dex_root),
+              "--targets", str(targets_path),
+              "--json", str(recovered / "recovered_methods.json"),
+              "--native-so", str(native_so),
+              "--mapping", str(mapping_path),
+              "--out", str(restored),
+          ]
+          subprocess.run(command, check=True)
+
+          report_path = restored / "restore_report.json"
+          report = json.loads(report_path.read_text(encoding="utf-8"))
+          if report.get("methods_skipped") != 0:
+              raise RuntimeError(
+                  "strict DEX restoration skipped methods: "
+                  + json.dumps(report.get("skipped_methods", []))
+              )
+          if report.get("methods_restored") != target_count:
+              raise RuntimeError(
+                  "strict DEX restoration count mismatch: "
+                  f"restored={report.get('methods_restored')} "
+                  f"targets={target_count}"
+              )
+
+          validation = recovered / "strict_validation"
+          validation.mkdir(parents=True, exist_ok=True)
+          for dex in dexes:
+              restored_dex = restored / dex.name
+              if not restored_dex.is_file():
+                  raise RuntimeError(
+                      f"restorer omitted expected output {restored_dex.name}"
+                  )
+              pipeline.disassemble(restored_dex, validation / dex.stem)
+          pipeline.validate_smali(validation)
+
+          # Preserve the original extracted DEX files and prove that the
+          # restorer wrote a separate output tree.
+          if any(
+              (restored / dex.name).resolve() == dex.resolve()
+              for dex in dexes
+          ):
+              raise RuntimeError("restorer output aliases an original DEX")
+          (recovered / "strict_validation.json").write_text(
+              json.dumps({
+                  "generated_mapping": str(generated_mapping),
+                  "targets": target_count,
+                  "methods_restored": report["methods_restored"],
+                  "methods_skipped": report["methods_skipped"],
+                  "validated_dexes": sorted(dex.name for dex in dexes),
+                  "originals_untouched": True,
+              }, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          print(
+              "Strict static DEX validation passed:",
+              report["methods_restored"], "methods",
+          )
+          PY
+
+          mkdir -p nmmp-debug/protected/restored
+          cp -a "$RESTORED/." nmmp-debug/protected/restored/
+          cp "$RECOVERY/strict_validation.json" \
+            nmmp-debug/protected/strict_validation.json
+          echo "RESTORED_DEX_DIR=nmmp-debug/protected/restored" >> "$GITHUB_ENV"
 
       - name: Collect APK and DEX evidence
         run: |
@@ -346,6 +742,29 @@ jobs:
             echo
             echo "A dispatch table maps encoded bytes to native handler targets."
             echo "It does not by itself prove the original DEX opcode."
+            echo
+            echo "## Generated permutation"
+            python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          permutation = json.loads(
+              Path("nmmp-debug/protected/opcode_permutation.json").read_text()
+          )
+          source = permutation["source"]
+          print(f"- Source: {source['path']}")
+          print(f"- Symbol: {source.get('symbol') or source.get('label') or '<json>'}")
+          print(f"- Direction: {source['direction']}")
+          print(
+              "- Validation: "
+              f"{permutation['validation']['entry_count']} entries, "
+              "bijection, NOP and DEX 039 holes fixed"
+          )
+          print(
+              "- Restorer handoff: "
+              "nmmp-debug/protected/handler_mapping_generated.json"
+          )
+          PY
           } > nmmp-debug/summary.md
 
       - name: Upload static debug bundle
