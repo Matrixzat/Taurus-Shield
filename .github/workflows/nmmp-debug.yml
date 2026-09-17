@@ -444,7 +444,12 @@ jobs:
           sha256sum nmmp-debug/input/input.apk \
             nmmp-debug/protected/protected.apk \
             | tee nmmp-debug/apk-hashes.txt
-          cp nmmp-protect.log nmmp-debug/nmmp-protect.log
+          if [ -f nmmp-protect.log ]; then
+            cp nmmp-protect.log nmmp-debug/nmmp-protect.log
+          else
+            printf 'Input was already protected; no local protection log.\\n' \
+              > nmmp-debug/nmmp-protect.log
+          fi
           if [ -n "${RULES_PATH:-}" ]; then
             cp "$RULES_PATH" nmmp-debug/input/rules.txt
           fi
