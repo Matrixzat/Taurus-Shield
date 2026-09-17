@@ -109,6 +109,38 @@ jobs:
                       ))
                   except (RuntimeError, ValueError, KeyError):
                       pass
+              # Older radare2 builds may emit no xref at all for an
+              # unresolved AArch64 import.  Derive the PLT target from the
+              # relocation order and scan the text for BL instructions.
+              try:
+                  relocations = run(["readelf", "-r", "--wide", str(so)])
+                  plt_index = 0
+                  vm_plt = None
+                  for line in relocations.splitlines():
+                      if "R_AARCH64_JUMP_SLOT" not in line:
+                          continue
+                      if "vmInterpret" in line:
+                          vm_plt = sections[".plt"][0] + 0x20 + plt_index * 0x10
+                          break
+                      plt_index += 1
+                  if vm_plt is not None:
+                      text_addr, text_offset, text_size = sections[".text"]
+                      raw_text = so.read_bytes()
+                      for offset in range(0, text_size, 4):
+                          word = int.from_bytes(
+                              raw_text[text_offset + offset:text_offset + offset + 4],
+                              "little",
+                          )
+                          if word & 0xfc000000 != 0x94000000:
+                              continue
+                          immediate = word & 0x03ffffff
+                          if immediate & 0x02000000:
+                              immediate -= 0x04000000
+                          target = text_addr + offset + (immediate << 2)
+                          if target == vm_plt:
+                              xrefs.append({"from": text_addr + offset})
+              except (OSError, RuntimeError, KeyError, ValueError):
+                  pass
               wrapper_addresses = set()
               for xref in xrefs:
                   function_addr = xref.get("fcn_addr")
