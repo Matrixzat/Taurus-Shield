@@ -138,7 +138,27 @@ jobs:
                               immediate -= 0x04000000
                           target = text_addr + offset + (immediate << 2)
                           if target == vm_plt:
-                              xrefs.append({"from": text_addr + offset})
+                              call_address = text_addr + offset
+                              xrefs.append({"from": call_address})
+                              for function_offset in range(offset, -1, -4):
+                                  function_word = int.from_bytes(
+                                      raw_text[
+                                          text_offset + function_offset:
+                                          text_offset + function_offset + 4
+                                      ],
+                                      "little",
+                                  )
+                                  # sub sp, sp, #imm is the first
+                                  # instruction of both generated wrapper
+                                  # shapes in this AArch64 build.
+                                  if (
+                                      function_word & 0xffc003ff
+                                      == 0xd10003ff
+                                  ):
+                                      xrefs.append({
+                                          "fcn_addr": text_addr + function_offset
+                                      })
+                                      break
               except (OSError, RuntimeError, KeyError, ValueError):
                   pass
               wrapper_addresses = set()
@@ -245,6 +265,12 @@ jobs:
                   item = recover_wrapper(so, addr, sections)
                   if not item:
                       continue
+                  instruction_address = item.get("insns_address")
+                  if instruction_address is not None:
+                      instruction_address = int(instruction_address, 16)
+                      text_address, _, text_size = sections[".text"]
+                      if text_address <= instruction_address < text_address + text_size:
+                          continue
                   item["registrations"] = by_wrapper.get(addr, [])
           '''
           if loop_old not in text:
