@@ -328,7 +328,9 @@ jobs:
 
           APK=$(find extracted -type f -iname '*.apk' -print -quit)
           test -n "$APK"
-          cp "$APK" extracted/input.apk
+          if [ "$APK" != "extracted/input.apk" ]; then
+            cp "$APK" extracted/input.apk
+          fi
           RULES=$(find extracted -type f -name 'rules.txt' -print -quit || true)
           MAPPING=$(find extracted -type f -name 'mapping.txt' -print -quit || true)
           echo "APK_PATH=extracted/input.apk" >> "$GITHUB_ENV"
