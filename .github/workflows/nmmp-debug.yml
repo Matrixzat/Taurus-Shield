@@ -72,6 +72,50 @@ jobs:
           test -f devirtualizer/runtime/runtime/analysis/protected-apk/restore_dex.py
           sha256sum "$bundle_name"
 
+      - name: Normalize radare2 wrapper discovery
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path(
+              "devirtualizer/runtime/runtime/analysis/protected-apk/"
+              "recover_nmmp.py"
+          )
+          text = path.read_text(encoding="utf-8")
+          old = '''    xrefs = r2_json(so, "aaa; axtj @ sym.imp.vmInterpret")
+              wrappers = sorted({int(x["fcn_addr"]) for x in xrefs if x.get("fcn_addr")})
+          '''
+          new = '''    xrefs = []
+              for import_name in ("sym.imp.vmInterpret", "imp.vmInterpret"):
+                  try:
+                      xrefs.extend(r2_json(so, f"aaa; axtj @ {import_name}"))
+                  except (RuntimeError, ValueError, KeyError):
+                      pass
+              wrapper_addresses = set()
+              for xref in xrefs:
+                  function_addr = xref.get("fcn_addr")
+                  if function_addr:
+                      wrapper_addresses.add(int(function_addr))
+                      continue
+                  call_addr = xref.get("from")
+                  if not call_addr:
+                      continue
+                  try:
+                      owners = r2_json(so, f"aaa; afij @ 0x{int(call_addr):x}")
+                  except (RuntimeError, ValueError, KeyError):
+                      continue
+                  for owner in owners:
+                      offset = owner.get("offset")
+                      if offset:
+                          wrapper_addresses.add(int(offset))
+              wrappers = sorted(wrapper_addresses)
+          '''
+          if old not in text:
+              raise SystemExit("recover_nmmp.py wrapper discovery block not found")
+          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          PY
+
       - name: Download release asset
         env:
           ASSET_ID: ${{ inputs.asset_id }}
