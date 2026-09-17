@@ -162,7 +162,20 @@ jobs:
           '''
           if old not in text:
               raise SystemExit("recover_nmmp.py wrapper discovery block not found")
-          path.write_text(text.replace(old, new, 1), encoding="utf-8")
+          text = text.replace(old, new, 1)
+          records_old = (
+              '    records = native_records(so, sections, set(wrappers))\n'
+          )
+          records_new = records_old + '''    if not wrappers:
+                  wrappers = sorted({
+                      int(record["wrapper"])
+                      for record in records
+                      if record.get("wrapper")
+                  })
+          '''
+          if records_old not in text:
+              raise SystemExit("recover_nmmp.py JNI record block not found")
+          path.write_text(text.replace(records_old, records_new, 1), encoding="utf-8")
           PY
 
       - name: Download release asset
