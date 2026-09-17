@@ -58,7 +58,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            binutils file unzip python3 openjdk-17-jdk wget
+            binutils file unzip python3 openjdk-17-jdk wget ninja-build
 
       - name: Extract APK without modifying the input
         run: |
@@ -93,6 +93,10 @@ jobs:
             rm -f cmake.tar.gz
           fi
           chmod +x cmake-standalone/bin/cmake
+          if [ ! -x cmake-standalone/bin/ninja ]; then
+            cp "$(command -v ninja)" cmake-standalone/bin/ninja
+            chmod +x cmake-standalone/bin/ninja
+          fi
 
           if [ ! -d android-ndk-r27c ]; then
             curl -fsSL \
