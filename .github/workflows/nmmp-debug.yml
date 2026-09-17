@@ -867,6 +867,7 @@ jobs:
                       f"restorer omitted expected output {restored_dex.name}"
                   )
               pipeline.disassemble(restored_dex, validation / dex.stem)
+          pipeline.remove_nmmp_bootstrap(validation)
           pipeline.validate_smali(validation)
 
           # Preserve the original extracted DEX files and prove that the
