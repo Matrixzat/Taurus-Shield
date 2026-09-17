@@ -44,6 +44,34 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Download static recovery tool bundle
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          bundle_name="nmmp-devirtualizer-tools.zip"
+          release_json=$(curl -fsSL \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/vnd.github+json' \
+            "${{ github.api_url }}/repos/${{ github.repository }}/releases/tags/analyze-queue")
+          bundle_url=$(printf '%s' "$release_json" |
+            jq -r --arg name "$bundle_name" \
+              '.assets[] | select(.name == $name) | .browser_download_url' |
+            head -1)
+          if [ -z "$bundle_url" ] || [ "$bundle_url" = "null" ]; then
+            echo "ERROR: missing $bundle_name on the analyze-queue release"
+            exit 1
+          fi
+          curl -fsSL -L \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H 'Accept: application/octet-stream' \
+            "$bundle_url" -o "$bundle_name"
+          test -s "$bundle_name"
+          unzip -q -o "$bundle_name"
+          test -f devirtualizer/runtime/runtime/analysis/protected-apk/recover_nmmp.py
+          test -f devirtualizer/runtime/runtime/analysis/protected-apk/restore_dex.py
+          sha256sum "$bundle_name"
+
       - name: Download release asset
         env:
           ASSET_ID: ${{ inputs.asset_id }}
