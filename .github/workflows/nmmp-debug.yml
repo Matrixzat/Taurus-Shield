@@ -201,7 +201,16 @@ jobs:
           '''
           if json_old not in text:
               raise SystemExit("recover_nmmp.py r2_json block not found")
-          path.write_text(text.replace(json_old, json_new, 1), encoding="utf-8")
+          text = text.replace(json_old, json_new, 1)
+          pdf_old = '''    doc = r2_json(so, f"aaa; pdfj @ 0x{function_addr:x}")
+              ops = doc.get("ops", [])
+          '''
+          pdf_new = '''    doc = r2_json(so, f"aaa; pdj 256 @ 0x{function_addr:x}")
+              ops = doc.get("ops", []) if isinstance(doc, dict) else doc
+          '''
+          if pdf_old not in text:
+              raise SystemExit("recover_nmmp.py pdfj block not found")
+          path.write_text(text.replace(pdf_old, pdf_new, 1), encoding="utf-8")
           PY
 
       - name: Download release asset
