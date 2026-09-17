@@ -1,8 +1,8 @@
 name: NMMP Debug Trace
 
 # This workflow is intentionally separate from vm-protect.yml.
-# It observes the protected APK and never replaces or uploads the normal
-# protection result.
+# It runs a separate protection copy, preserves the fresh input and protected
+# output, and never replaces or uploads the normal protection result.
 on:
   workflow_dispatch:
     inputs:
@@ -34,7 +34,7 @@ jobs:
   static-debug:
     name: Static NMMP evidence
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     permissions:
       contents: read
 
@@ -54,11 +54,11 @@ jobs:
           sha256sum input_asset | tee input_asset.sha256
           file input_asset
 
-      - name: Install static-analysis tools
+      - name: Install protection and static-analysis tools
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends \
-            binutils file unzip python3
+            binutils file unzip python3 openjdk-17-jdk wget
 
       - name: Extract APK without modifying the input
         run: |
@@ -72,38 +72,154 @@ jobs:
 
           APK=$(find extracted -type f -iname '*.apk' -print -quit)
           test -n "$APK"
-          cp "$APK" extracted/analysis.apk
-          echo "APK_PATH=extracted/analysis.apk" >> "$GITHUB_ENV"
+          cp "$APK" extracted/input.apk
+          RULES=$(find extracted -type f -name 'rules.txt' -print -quit || true)
+          MAPPING=$(find extracted -type f -name 'mapping.txt' -print -quit || true)
+          echo "APK_PATH=extracted/input.apk" >> "$GITHUB_ENV"
+          echo "RULES_PATH=$RULES" >> "$GITHUB_ENV"
+          echo "MAPPING_PATH=$MAPPING" >> "$GITHUB_ENV"
           echo "APK path: $APK"
           unzip -Z1 "$APK" | sort > debug_zip_entries.txt
+
+      - name: Prepare NMMP toolchain
+        run: |
+          set -euo pipefail
+          if [ ! -f cmake-standalone/bin/cmake ]; then
+            curl -fsSL \
+              "https://github.com/${GITHUB_REPOSITORY}/releases/download/prebuilt/cmake-3.28.3-linux-x86_64.tar.gz" \
+              -o cmake.tar.gz
+            mkdir -p cmake-standalone
+            tar -xzf cmake.tar.gz -C cmake-standalone --strip-components=1
+            rm -f cmake.tar.gz
+          fi
+          chmod +x cmake-standalone/bin/cmake
+
+          if [ ! -d android-ndk-r27c ]; then
+            curl -fsSL \
+              "https://github.com/${GITHUB_REPOSITORY}/releases/download/prebuilt/android-ndk-r27c-linux.zip" \
+              -o android-ndk.zip
+            unzip -q android-ndk.zip
+            rm -f android-ndk.zip
+          fi
+
+          if [ ! -s vm-protect.jar ]; then
+            curl -fsSL \
+              "https://github.com/${GITHUB_REPOSITORY}/releases/download/prebuilt/vm-protect-2023-07-08-0942.jar" \
+              -o vm-protect.jar
+          fi
+          test -s vm-protect.jar
+
+          mkdir -p tools
+          cat > tools/config.json <<EOF
+          {
+            "abi": {
+              "armeabi-v7a": true,
+              "arm64-v8a": true,
+              "x86": false,
+              "x86_64": false
+            },
+            "environment": {
+              "sdk_path": "${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}",
+              "cmake_path": "$GITHUB_WORKSPACE/cmake-standalone",
+              "ndk_path": "$GITHUB_WORKSPACE/android-ndk-r27c",
+              "ndk_toolchains": "/toolchains/llvm/prebuilt/",
+              "ndk_abi": "linux-x86_64",
+              "ndk_strip": "/bin/llvm-strip"
+            }
+          }
+          EOF
+
+          echo "CMAKE_PATH=$GITHUB_WORKSPACE/cmake-standalone" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$GITHUB_WORKSPACE/android-ndk-r27c" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_HOME=${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}" \
+            >> "$GITHUB_ENV"
+
+      - name: Run NMMP protection with supplied class rules
+        run: |
+          set -euo pipefail
+          APK="$GITHUB_WORKSPACE/$APK_PATH"
+          JAR="$GITHUB_WORKSPACE/vm-protect.jar"
+          ARGS=(java -jar "$JAR" apk "$APK")
+          if [ -n "${RULES_PATH:-}" ]; then
+            ARGS+=("$GITHUB_WORKSPACE/$RULES_PATH")
+            echo "Using class rules: $RULES_PATH"
+          else
+            echo "No rules.txt supplied; using NMMP defaults."
+          fi
+          if [ -n "${MAPPING_PATH:-}" ]; then
+            ARGS+=("$GITHUB_WORKSPACE/$MAPPING_PATH")
+            echo "Using mapping: $MAPPING_PATH"
+          fi
+
+          export ANDROID_NDK_HOME CMAKE_PATH
+          printf 'Protection command:'
+          printf ' %q' "${ARGS[@]}"
+          printf '\n'
+          "${ARGS[@]}" 2>&1 | tee nmmp-protect.log
+          exit "${PIPESTATUS[0]}"
+
+      - name: Preserve input and protected APKs
+        run: |
+          set -euo pipefail
+          mkdir -p nmmp-debug/input nmmp-debug/protected
+          cp "$GITHUB_WORKSPACE/$APK_PATH" nmmp-debug/input/input.apk
+          find . -type f -iname '*protect*.apk' -not -path './nmmp-debug/*' \
+            -print | head -1 > protected_path.txt
+          PROTECTED=$(cat protected_path.txt)
+          if [ -z "$PROTECTED" ]; then
+            echo "Protected APK was not produced."
+            find . -type f -iname '*.apk' -print
+            exit 1
+          fi
+          cp "$PROTECTED" nmmp-debug/protected/protected.apk
+          echo "PROTECTED_APK=nmmp-debug/protected/protected.apk" >> "$GITHUB_ENV"
+          sha256sum nmmp-debug/input/input.apk \
+            nmmp-debug/protected/protected.apk \
+            | tee nmmp-debug/apk-hashes.txt
+          cp nmmp-protect.log nmmp-debug/nmmp-protect.log
+          if [ -n "${RULES_PATH:-}" ]; then
+            cp "$RULES_PATH" nmmp-debug/input/rules.txt
+          fi
+          if [ -n "${MAPPING_PATH:-}" ]; then
+            cp "$MAPPING_PATH" nmmp-debug/input/mapping.txt
+          fi
 
       - name: Collect APK and DEX evidence
         run: |
           set -euo pipefail
-          mkdir -p nmmp-debug/dex
-          APK="$GITHUB_WORKSPACE/$APK_PATH"
+          for kind in input protected; do
+            if [ "$kind" = input ]; then
+              APK="$GITHUB_WORKSPACE/$APK_PATH"
+            else
+              APK="$GITHUB_WORKSPACE/$PROTECTED_APK"
+            fi
+            entries="nmmp-debug/$kind/zip_entries.txt"
+            mkdir -p "nmmp-debug/$kind/dex"
+            unzip -Z1 "$APK" | sort > "$entries"
 
-          {
-            echo "=== APK ==="
-            file "$APK"
-            sha256sum "$APK"
-            stat -c 'bytes=%s' "$APK"
-            echo
-            echo "=== ZIP entries ==="
-            cat debug_zip_entries.txt
-          } > nmmp-debug/apk.txt
+            {
+              echo "=== $kind APK ==="
+              file "$APK"
+              sha256sum "$APK"
+              stat -c 'bytes=%s' "$APK"
+              echo
+              echo "=== ZIP entries ==="
+              cat "$entries"
+            } > "nmmp-debug/$kind/apk.txt"
 
-          while IFS= read -r dex; do
-            name=$(basename "$dex")
-            unzip -p "$APK" "$dex" | sha256sum \
-              > "nmmp-debug/dex/${name}.sha256"
-          done < <(grep -E '^classes([0-9]+)?\.dex$' debug_zip_entries.txt || true)
+            while IFS= read -r dex; do
+              name=$(basename "$dex")
+              unzip -p "$APK" "$dex" | sha256sum \
+                > "nmmp-debug/$kind/dex/${name}.sha256"
+            done < <(grep -E '^classes([0-9]+)?\.dex$' "$entries" || true)
+          done
 
       - name: Collect native ELF and dispatch evidence
         run: |
           set -euo pipefail
-          mkdir -p nmmp-debug/native
-          APK="$GITHUB_WORKSPACE/$APK_PATH"
+          rm -rf extracted/native
+          mkdir -p nmmp-debug/protected/native
+          APK="$GITHUB_WORKSPACE/$PROTECTED_APK"
           unzip -q -o "$APK" 'lib/*/*.so' -d extracted/native || true
 
           find extracted/native -type f -name '*.so' -print0 |
@@ -131,11 +247,11 @@ jobs:
               strings -a "$so" |
                 grep -Ei 'nmmp|nmmvm|vmInterpret|cacheInitial|gVm|resolver|opcode' ||
                 true
-            } > "nmmp-debug/native/${safe}.txt"
+            } > "nmmp-debug/protected/native/${safe}.txt"
           done
 
           python3 - "$GITHUB_WORKSPACE/extracted/native" \
-            "$GITHUB_WORKSPACE/nmmp-debug/dispatch_tables.json" <<'PY'
+            "$GITHUB_WORKSPACE/nmmp-debug/protected/dispatch_tables.json" <<'PY'
           import json
           import re
           import subprocess
@@ -205,6 +321,8 @@ jobs:
             echo "- Repository: \`${GITHUB_REPOSITORY}\`"
             echo "- Workflow run: \`${GITHUB_RUN_ID}\`"
             echo "- Input asset ID: \`${{ inputs.asset_id }}\`"
+            echo "- Class rules: \`${RULES_PATH:-none}\`"
+            echo "- Protected APK: \`${PROTECTED_APK}\`"
             echo
             echo "## Files"
             find nmmp-debug -type f -printf '%p\n' | sort
@@ -214,7 +332,9 @@ jobs:
           import json
           from pathlib import Path
 
-          data = json.loads(Path("nmmp-debug/dispatch_tables.json").read_text())
+          data = json.loads(
+              Path("nmmp-debug/protected/dispatch_tables.json").read_text()
+          )
           for name, item in data.items():
               tables = item.get("complete_256_entry_tables", [])
               print(f"- {name}: {len(tables)} complete 256-entry table(s)")
@@ -235,32 +355,24 @@ jobs:
   emulator-smoke:
     name: Optional Android runtime smoke trace
     if: ${{ inputs.run_emulator }}
+    needs: static-debug
     runs-on: ubuntu-latest
     timeout-minutes: 35
     permissions:
       contents: read
 
     steps:
-      - name: Download release asset
-        env:
-          ASSET_ID: ${{ inputs.asset_id }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download protected debug bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: nmmp-debug-static-${{ inputs.job_id }}
+          path: debug-input
+
+      - name: Prepare protected APK
         run: |
           set -euo pipefail
-          curl -fsSL \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/octet-stream" \
-            "${{ github.api_url }}/repos/${{ github.repository }}/releases/assets/${ASSET_ID}" \
-            -o input_asset
-          mkdir -p extracted
-          if zipinfo -1 input_asset 2>/dev/null | grep -Eiq '\.apk$'; then
-            unzip -q -o input_asset -d extracted
-          else
-            cp input_asset extracted/input.apk
-          fi
-          APK=$(find extracted -type f -iname '*.apk' -print -quit)
-          test -n "$APK"
-          cp "$APK" analysis.apk
+          test -s debug-input/protected/protected.apk
+          cp debug-input/protected/protected.apk analysis.apk
 
       - name: Boot emulator and collect runtime logs
         uses: reactivecircus/android-emulator-runner@v2
@@ -275,7 +387,8 @@ jobs:
             mkdir -p emulator-debug
             adb devices -l | tee emulator-debug/devices.txt
             adb shell getprop | sort > emulator-debug/getprop.txt
-            adb install -r analysis.apk 2>&1 | tee emulator-debug/install.txt || true
+            adb install -r analysis.apk 2>&1 |
+              tee emulator-debug/install.txt || true
 
             if [ -n "${{ inputs.package_name }}" ]; then
               adb shell monkey -p "${{ inputs.package_name }}" 1 \
