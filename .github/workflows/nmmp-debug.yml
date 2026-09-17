@@ -253,6 +253,15 @@ jobs:
               r"(?:\[\s*(?:256)?\s*\])?\s*=\s*\{(?P<body>.*?)\}",
               re.IGNORECASE | re.DOTALL,
           )
+          opcode_enum = re.compile(
+              r"\benum\s+Opcode\s*\{(?P<body>.*?)\};",
+              re.IGNORECASE | re.DOTALL,
+          )
+          enum_entry = re.compile(
+              r"^\s*(?P<name>OP_[A-Z0-9_]+)\s*=\s*"
+              r"(?P<value>0[xX][0-9A-Fa-f]+|[0-9]+)\s*,?",
+              re.MULTILINE,
+          )
 
           def valid(values):
               return (
@@ -353,6 +362,42 @@ jobs:
                   label = match.group("kind")
                   values = numbers(match.group("body"))
                   add_candidate(path, symbol, values, label, "c_initializer")
+
+              # The protector's generated DexOpcodes.h keeps the canonical
+              # OP_* declaration order and randomizes the assigned enum
+              # values.  That enum is the exact standard-opcode -> encoded
+              # permutation; it is not inferred from native handlers.
+              for match in opcode_enum.finditer(text):
+                  entries = [
+                      (item.group("name"), int(item.group("value"), 0))
+                      for item in enum_entry.finditer(match.group("body"))
+                  ]
+                  if len(entries) != 256:
+                      continue
+                  canonical = Path.cwd() / (
+                      "devirtualizer/runtime/runtime/nmmp/"
+                      "nmmvm/nmmvm/src/main/cpp/vm/DexOpcodes.h"
+                  )
+                  try:
+                      canonical_text = canonical.read_text(encoding="utf-8")
+                      canonical_body = opcode_enum.search(canonical_text).group(
+                          "body"
+                      )
+                      canonical_names = [
+                          item.group("name")
+                          for item in enum_entry.finditer(canonical_body)
+                      ]
+                  except (OSError, AttributeError):
+                      canonical_names = []
+                  if canonical_names != [name for name, _ in entries]:
+                      continue
+                  add_candidate(
+                      path,
+                      "Opcode",
+                      [value for _, value in entries],
+                      "standard_to_encoded_opcode_enum",
+                      "opcode_enum",
+                  )
 
           # Same values in multiple generated copies are one source candidate;
           # different arrays or directions are ambiguous and must stop the job.
@@ -769,6 +814,7 @@ jobs:
 
       - name: Upload static debug bundle
         uses: actions/upload-artifact@v4
+        if: ${{ always() }}
         with:
           name: nmmp-debug-static-${{ inputs.job_id }}
           path: nmmp-debug/
