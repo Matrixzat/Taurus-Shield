@@ -8,7 +8,13 @@ on:
     inputs:
       asset_id:
         description: "Release asset ID containing the APK or APK bundle"
-        required: true
+        required: false
+        default: ""
+        type: string
+      source_url:
+        description: "Direct APK URL for a one-off protected-input test"
+        required: false
+        default: ""
         type: string
       job_id:
         description: "Unique ID used for the debug artifact name"
@@ -16,6 +22,11 @@ on:
         type: string
       run_emulator:
         description: "Boot an Android emulator and collect a smoke log"
+        required: false
+        default: false
+        type: boolean
+      already_protected:
+        description: "Treat the input asset as an already-protected NMMP APK"
         required: false
         default: false
         type: boolean
@@ -281,14 +292,20 @@ jobs:
       - name: Download release asset
         env:
           ASSET_ID: ${{ inputs.asset_id }}
+          SOURCE_URL: ${{ inputs.source_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          curl -fsSL \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/octet-stream" \
-            "${{ github.api_url }}/repos/${{ github.repository }}/releases/assets/${ASSET_ID}" \
-            -o input_asset
+          if [ -n "$SOURCE_URL" ]; then
+            curl -fsSL -L "$SOURCE_URL" -o input_asset
+          else
+            test -n "$ASSET_ID"
+            curl -fsSL \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/octet-stream" \
+              "${{ github.api_url }}/repos/${{ github.repository }}/releases/assets/${ASSET_ID}" \
+              -o input_asset
+          fi
           test -s input_asset
           sha256sum input_asset | tee input_asset.sha256
           file input_asset
@@ -321,6 +338,7 @@ jobs:
           unzip -Z1 "$APK" | sort > debug_zip_entries.txt
 
       - name: Prepare NMMP toolchain
+        if: ${{ !inputs.already_protected }}
         run: |
           set -euo pipefail
           if [ ! -f cmake-standalone/bin/cmake ]; then
@@ -378,6 +396,7 @@ jobs:
             >> "$GITHUB_ENV"
 
       - name: Run NMMP protection with supplied class rules
+        if: ${{ !inputs.already_protected }}
         run: |
           set -euo pipefail
           APK="$GITHUB_WORKSPACE/$APK_PATH"
@@ -406,9 +425,13 @@ jobs:
           set -euo pipefail
           mkdir -p nmmp-debug/input nmmp-debug/protected
           cp "$GITHUB_WORKSPACE/$APK_PATH" nmmp-debug/input/input.apk
-          find . -type f -iname '*protect*.apk' -not -path './nmmp-debug/*' \
-            -print | head -1 > protected_path.txt
-          PROTECTED=$(cat protected_path.txt)
+          if [ "${{ inputs.already_protected }}" = "true" ]; then
+            PROTECTED="$GITHUB_WORKSPACE/$APK_PATH"
+          else
+            find . -type f -iname '*protect*.apk' -not -path './nmmp-debug/*' \
+              -print | head -1 > protected_path.txt
+            PROTECTED=$(cat protected_path.txt)
+          fi
           if [ -z "$PROTECTED" ]; then
             echo "Protected APK was not produced."
             find . -type f -iname '*.apk' -print
@@ -428,6 +451,7 @@ jobs:
           fi
 
       - name: Preserve generated dex2c mapping evidence
+        if: ${{ !inputs.already_protected }}
         run: |
           set -euo pipefail
           DEX2C="$GITHUB_WORKSPACE/extracted/build/dex2c"
@@ -457,6 +481,24 @@ jobs:
       - name: Extract exact generated opcode permutation
         run: |
           set -euo pipefail
+          if [ "${{ inputs.already_protected }}" = "true" ]; then
+            mkdir -p nmmp-debug/protected
+            rm -rf protected-lib
+            mkdir -p protected-lib
+            unzip -q -o "$GITHUB_WORKSPACE/$PROTECTED_APK" \
+              'lib/arm64-v8a/libnmmvm.so' -d protected-lib
+            python3 devirtualizer/runtime/runtime/analysis/protected-apk/map_vm_opcodes.py \
+              devirtualizer/runtime/runtime/reference_vm/libnmmvm.so \
+              protected-lib/lib/arm64-v8a/libnmmvm.so \
+              --reference-table auto \
+              --protected-table auto \
+              --out "$GITHUB_WORKSPACE/nmmp-debug/protected/handler_mapping_generated.json"
+            echo "OPCODE_PERMUTATION_JSON=" >> "$GITHUB_ENV"
+            echo "GENERATED_MAPPING_JSON=nmmp-debug/protected/handler_mapping_generated.json" \
+              >> "$GITHUB_ENV"
+            echo "Static native mapping recovered for already-protected APK."
+            exit 0
+          fi
           python3 - "$DEX2C_ROOT" \
             "$GITHUB_WORKSPACE/nmmp-debug/protected/opcode_permutation.json" \
             "$GITHUB_WORKSPACE/nmmp-debug/protected/handler_mapping_generated.json" <<'PY'
