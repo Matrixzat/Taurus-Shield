@@ -60,7 +60,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          bundle_name="nmmp-devirtualizer-tools.zip"
+          bundle_name="nmmp-devirtualizer-tools-boundary-closure.zip"
           release_json=$(curl -fsSL \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H 'Accept: application/vnd.github+json' \
