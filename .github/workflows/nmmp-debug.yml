@@ -931,30 +931,60 @@ jobs:
           solved_mapping = recovered / "format_solved_mapping.json"
           solver = analysis / "solve_opcode_formats.py"
           solver_jar = runtime / "tools/format-solver-all.jar"
-          solver_process = subprocess.run(
-              [
-                  sys.executable,
-                  str(solver),
-                  "--solver", str(solver_jar),
-                  "--methods", str(recovered / "recovered_methods.json"),
-                  "--mapping", str(mapping_path),
-                  "--out", str(solved_mapping),
-              ],
-              text=True,
-              capture_output=True,
-          )
-          if solver_process.returncode:
+          solver_command = [
+              sys.executable,
+              str(solver),
+              "--solver", str(solver_jar),
+              "--methods", str(recovered / "recovered_methods.json"),
+              "--mapping", str(mapping_path),
+              "--out", str(solved_mapping),
+          ]
+          solver_timed_out = False
+          try:
+              solver_process = subprocess.run(
+                  solver_command,
+                  text=True,
+                  capture_output=True,
+                  timeout=300,
+              )
+          except subprocess.TimeoutExpired as exc:
+              solver_timed_out = True
+              stdout = exc.stdout or ""
+              stderr = exc.stderr or ""
+              if isinstance(stdout, bytes):
+                  stdout = stdout.decode(errors="replace")
+              if isinstance(stderr, bytes):
+                  stderr = stderr.decode(errors="replace")
+              solver_process = subprocess.CompletedProcess(
+                  solver_command,
+                  124,
+                  stdout=stdout,
+                  stderr=stderr + "\nformat solver timed out after 300 seconds",
+              )
+          if solver_timed_out or solver_process.returncode:
               mapping_data = json.loads(mapping_path.read_text())
               diagnostic = workspace / "nmmp-debug/protected/unsupported_mapping.json"
               diagnostic.parent.mkdir(parents=True, exist_ok=True)
+              timed_out_reason = (
+                  "The format solver exceeded the five-minute limit. No DEX "
+                  "was written."
+              )
+              ambiguous_reason = (
+                  "The recovered opcode evidence does not prove one unique "
+                  "verifier-safe permutation. No DEX was written."
+              )
               diagnostic.write_text(
                   json.dumps(
                       {
-                          "status": "unsupported_or_ambiguous",
+                          "status": (
+                              "solver_timeout"
+                              if solver_timed_out
+                              else "unsupported_or_ambiguous"
+                          ),
                           "reason": (
-                              "The recovered opcode evidence does not prove "
-                              "one unique verifier-safe permutation. No DEX "
-                              "was written."
+                              timed_out_reason
+                              if solver_timed_out
+                              else ambiguous_reason
                           ),
                           "solver_stdout": solver_process.stdout,
                           "solver_stderr": solver_process.stderr,
@@ -984,15 +1014,26 @@ jobs:
                   encoding="utf-8",
               )
               print(
-                  "UNSUPPORTED_OR_AMBIGUOUS_MAPPING:",
+                  (
+                      "FORMAT_SOLVER_TIMEOUT:"
+                      if solver_timed_out
+                      else "UNSUPPORTED_OR_AMBIGUOUS_MAPPING:"
+                  ),
                   solver_process.stderr.strip()
                   or solver_process.stdout.strip()
                   or "format solver rejected the mapping",
               )
               print("Diagnostic artifact:", diagnostic)
               raise RuntimeError(
-                  "static opcode mapping is unsupported or ambiguous; "
-                  "refusing to write restored DEX files"
+                  (
+                      "format solver timed out; refusing to write restored "
+                      "DEX files"
+                      if solver_timed_out
+                      else (
+                          "static opcode mapping is unsupported or ambiguous; "
+                          "refusing to write restored DEX files"
+                      )
+                  )
               )
           mapping_path = solved_mapping
           native_so = recovered / "_apk/lib/arm64-v8a/libnmmp.so"
