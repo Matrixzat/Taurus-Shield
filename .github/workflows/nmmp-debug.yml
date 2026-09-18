@@ -78,7 +78,23 @@ jobs:
             -H 'Accept: application/octet-stream' \
             "$bundle_url" -o "$bundle_name"
           test -s "$bundle_name"
+          override_dir="$RUNNER_TEMP/nmmp-repository-overrides"
+          mkdir -p "$override_dir"
+          for relative in \
+            devirtualizer/runtime/runtime/analysis/protected-apk/solve_opcode_formats.py \
+            devirtualizer/runtime/runtime/analysis/protected-apk/read_armv7_dispatch.py
+          do
+            test -f "$relative"
+            cp "$relative" "$override_dir/$(basename "$relative")"
+          done
           unzip -q -o "$bundle_name"
+          for relative in \
+            devirtualizer/runtime/runtime/analysis/protected-apk/solve_opcode_formats.py \
+            devirtualizer/runtime/runtime/analysis/protected-apk/read_armv7_dispatch.py
+          do
+            mkdir -p "$(dirname "$relative")"
+            cp "$override_dir/$(basename "$relative")" "$relative"
+          done
           test -f devirtualizer/runtime/runtime/analysis/protected-apk/recover_nmmp.py
           test -f devirtualizer/runtime/runtime/analysis/protected-apk/restore_dex.py
           sha256sum "$bundle_name"
