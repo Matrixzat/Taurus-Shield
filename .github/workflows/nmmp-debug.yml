@@ -903,6 +903,31 @@ jobs:
 
           mapping_path = recovered / "handler_mapping_generated.json"
           shutil.copy2(generated_mapping, mapping_path)
+          mapping_data = json.loads(mapping_path.read_text(encoding="utf-8"))
+          if mapping_data.get("schema") != "nmmp-generated-handler-mapping/v1":
+              # An already-protected APK has no generated dex2c tree to
+              # inspect.  The pre-recovery native mapper therefore produces
+              # only the handler evidence it can prove statically.  Re-run it
+              # after recovery with the method corpus so boundary closure
+              # promotes every proven method-entry byte and solver-visible
+              # successor boundary.  Do not replace an exact generated
+              # permutation from a fresh protection run.
+              protected_vm = dex_root / "lib/arm64-v8a/libnmmvm.so"
+              mapper = analysis / "map_vm_opcodes.py"
+              reference_vm = runtime / "reference_vm/libnmmvm.so"
+              subprocess.run(
+                  [
+                      sys.executable,
+                      str(mapper),
+                      str(reference_vm),
+                      str(protected_vm),
+                      "--reference-table", "auto",
+                      "--protected-table", "auto",
+                      "--corpus", str(recovered / "recovered_methods.json"),
+                      "--out", str(mapping_path),
+                  ],
+                  check=True,
+              )
           solved_mapping = recovered / "format_solved_mapping.json"
           solver = analysis / "solve_opcode_formats.py"
           solver_jar = runtime / "tools/format-solver-all.jar"
