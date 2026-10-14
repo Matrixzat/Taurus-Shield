@@ -1,0 +1,7 @@
+{
+  "repository": "https://github.com/worawit/blutter.git",
+  "commit": "4a60ac648bf448c5a7596437243bcd0b9376fdf0",
+  "stable_dart_versions": [
+    "3.13.5"
+  ]
+}
