@@ -39,6 +39,9 @@ jobs:
       - name: Flutter version check
         run: flutter --version
 
+      - name: Refresh and verify Hermes engine
+        run: python3 Taurus-Shield/android/sync_hbctool.py
+
       - name: Get Flutter dependencies
         working-directory: Taurus-Shield
         run: flutter pub get

@@ -22,6 +22,9 @@ jobs:
       contents: write
 
     steps:
+      - name: Check out Taurus build scripts
+        uses: actions/checkout@v4
+
       - name: Download uploaded ZIP
         run: |
           curl -fL \
@@ -102,55 +105,31 @@ jobs:
           fi
           java -version
 
-      # ── dpt-shell: cache by release tag so re-downloads only on new versions ──
-      - name: Get dpt-shell latest tag
+      - name: Check upstream latest stable DPT Shell release
         id: dpt_ver
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
-          RELEASE=$(curl -fsSL https://api.github.com/repos/luoyesiqiu/dpt-shell/releases/latest)
-          TAG=$(printf '%s' "$RELEASE" \
-            | python3 -c "import sys,json; print(json.load(sys.stdin)['tag_name'])")
-          case "$TAG" in v*) ;; *) echo "Invalid dpt-shell release tag: $TAG"; exit 1 ;; esac
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "dpt-shell latest: $TAG"
+          python3 scripts/dpt_release.py resolve --github-output "$GITHUB_OUTPUT"
 
-      - name: Cache dpt-shell
+      - name: Cache verified DPT Shell executable
         id: cache_dpt
         uses: actions/cache@v4
         with:
           path: dpt-shell-release
-          key: dpt-shell-${{ steps.dpt_ver.outputs.tag }}
+          key: dpt-shell-${{ steps.dpt_ver.outputs.release_id }}-${{ steps.dpt_ver.outputs.asset_id }}-${{ steps.dpt_ver.outputs.digest }}
 
-      - name: Download dpt-shell
+      - name: Download and verify exact upstream executable
         if: steps.cache_dpt.outputs.cache-hit != 'true'
-        run: |
-          set -euo pipefail
-          RELEASE_URL=$(curl -fsSL https://api.github.com/repos/luoyesiqiu/dpt-shell/releases/latest \
-            | python3 -c "import sys,json; assets=json.load(sys.stdin)['assets']; print(next(a['browser_download_url'] for a in assets if a['name'].endswith('.zip')))")
-          echo "Downloading dpt-shell from: $RELEASE_URL"
-          wget -q -O dpt-shell.zip "$RELEASE_URL"
-          unzip -q dpt-shell.zip -d dpt-shell-release
-          echo "=== dpt-shell release contents ==="
-          find dpt-shell-release/ -type f | head -30
+        run: python3 scripts/dpt_release.py fetch
 
-      - name: Locate dpt.jar
+      - name: Verify cached or downloaded DPT executable
         run: |
-          DPT_JAR=$(find dpt-shell-release/ -name "dpt.jar" | head -1)
-          if [ -z "$DPT_JAR" ]; then
-            echo "ERROR: dpt.jar not found in release ZIP"
-            exit 1
-          fi
+          python3 scripts/dpt_release.py verify
+          DPT_JAR=$(find dpt-shell-release -name dpt.jar -type f | head -1)
           DPT_DIR=$(dirname "$(realpath "$DPT_JAR")")
-          echo "Found dpt.jar at: $DPT_JAR  (dir: $DPT_DIR)"
-          echo "DPT_DIR=$DPT_DIR" >> $GITHUB_ENV
-
-          if [ ! -d "$DPT_DIR/shell-files" ]; then
-            echo "WARNING: shell-files/ not found next to dpt.jar — listing dir:"
-            ls -la "$DPT_DIR/"
-          else
-            echo "shell-files/ found OK"
-            ls "$DPT_DIR/shell-files/" | head -10
-          fi
+          echo "DPT_DIR=$DPT_DIR" >> "$GITHUB_ENV"
+          echo "Selected latest upstream tag: ${{ steps.dpt_ver.outputs.tag }}"
           (cd "$DPT_DIR" && java -jar dpt.jar -v)
 
       - name: Run DPT Shell protection

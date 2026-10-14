@@ -4,30 +4,43 @@ on:
   workflow_dispatch:
     inputs:
       dart_versions:
-        description: 'Comma-separated Dart versions (e.g. 3.4.4,3.5.4,3.6.2)'
+        description: 'auto = current stable Dart; optional comma-separated versions'
         required: false
-        default: '3.3.4,3.4.4,3.5.4,3.6.2,3.7.2,3.11.5,3.13.3'
+        default: 'auto'
   push:
     tags:
       - 'blutter-*'
 
 jobs:
+  resolve:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.versions.outputs.matrix }}
+      sha: ${{ steps.upstream.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Discover Dart stable automatically
+        id: versions
+        env:
+          REQUESTED_VERSIONS: ${{ inputs.dart_versions || 'auto' }}
+        run: python3 scripts/blutter_versions.py --versions "$REQUESTED_VERSIONS"
+      - name: Resolve latest upstream Blutter
+        id: upstream
+        run: |
+          set -euo pipefail
+          SHA=$(git ls-remote https://github.com/worawit/blutter.git HEAD | cut -f1)
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Cannot resolve Blutter HEAD"; exit 1; }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: resolve
     name: Build Dart ${{ matrix.dart_version }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
 
     strategy:
       fail-fast: false
-      matrix:
-        dart_version:
-          - '3.3.4'
-          - '3.4.4'
-          - '3.5.4'
-          - '3.6.2'
-          - '3.7.2'
-          - '3.11.5'
-          - '3.13.3'
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix) }}
 
     steps:
       - name: Checkout
@@ -59,16 +72,27 @@ jobs:
           echo "Found NDK: $NDK_HOME"
           ls "$NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/" | grep "aarch64" | head -5
 
-      - name: Clone blutter
+      - name: Checkout current upstream Blutter
+        uses: actions/checkout@v4
+        with:
+          repository: worawit/blutter
+          ref: ${{ needs.resolve.outputs.sha }}
+          path: blutter
+          persist-credentials: false
+
+      - name: Record binary provenance
+        env:
+          BLUTTER_SHA: ${{ needs.resolve.outputs.sha }}
+          DART_VERSION: ${{ matrix.dart_version }}
         run: |
-          set -euo pipefail
-          SHA=$(git ls-remote https://github.com/worawit/blutter.git HEAD | cut -f1)
-          test "${#SHA}" -eq 40
-          git clone --depth=1 https://github.com/worawit/blutter.git blutter
-          git -C blutter fetch --depth=1 origin "$SHA"
-          git -C blutter checkout --detach "$SHA"
-          echo "Blutter revision: ${SHA:0:12}"
-          ls blutter/
+          python3 - <<'PY'
+          import json, os, pathlib
+          version = os.environ['DART_VERSION']
+          pathlib.Path('blutter_dartvm' + version + '_android_arm64.json').write_text(json.dumps({
+              'repository': 'https://github.com/worawit/blutter',
+              'commit': os.environ['BLUTTER_SHA'], 'dart_version': version,
+              'host_target': 'android_arm64'}, indent=2) + '\n')
+          PY
 
       - name: Build for Dart ${{ matrix.dart_version }}
         run: |
@@ -91,7 +115,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: blutter_dartvm${{ matrix.dart_version }}_android_arm64
-          path: blutter_dartvm${{ matrix.dart_version }}_android_arm64
+          path: |
+            blutter_dartvm${{ matrix.dart_version }}_android_arm64
+            blutter_dartvm${{ matrix.dart_version }}_android_arm64.json
           retention-days: 7
 
   release:
@@ -119,6 +145,7 @@ jobs:
           body: |
             Pre-compiled blutter binaries for Android ARM64.
             Built with Android NDK — no external .so dependencies.
-            Taurus Shield downloads the matching binary automatically.
+            Dart versions are discovered automatically; matching cloud-job builds remain on demand.
+            Each asset includes its exact upstream commit and Dart version.
           files: artifacts/**/*
           make_latest: true

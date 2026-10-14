@@ -31,65 +31,76 @@ jobs:
         run: |
           python3 - <<'EOF'
           import zipfile, os, sys
+
           os.makedirs("il2cpp", exist_ok=True)
+
           with zipfile.ZipFile("input.bin") as z:
               names = z.namelist()
-              print(f"Entries: {len(names)}")
+              print(f"Entries in upload: {len(names)}")
+              for n in names[:10]:
+                  print(f"  {n}")
+
+              # ── Detect slim zip (app pre-extracted libil2cpp.so + metadata at root) ──
               slim_so   = "libil2cpp.so"        if "libil2cpp.so"        in names else None
               slim_meta = "global-metadata.dat" if "global-metadata.dat" in names else None
+
               if slim_so and slim_meta:
-                  print("Format: SLIM ZIP")
+                  print("Format: SLIM ZIP (pre-extracted by Taurus Shield app)")
                   for src, dst in [(slim_so, "il2cpp/libil2cpp.so"),
                                    (slim_meta, "il2cpp/global-metadata.dat")]:
                       data = z.read(src)
                       with open(dst, "wb") as f: f.write(data)
                       print(f"  {src} -> {dst}  ({len(data)//1024} KB)")
               else:
-                  print("Format: FULL APK")
-                  il2cpp_c = sorted([n for n in names if "libil2cpp.so" in n],
-                                    key=lambda x: 0 if "arm64" in x else 1)
-                  meta_c   = [n for n in names if "global-metadata.dat" in n]
-                  if not il2cpp_c: print("ERROR: no libil2cpp.so"); sys.exit(1)
-                  if not meta_c:   print("ERROR: no global-metadata.dat"); sys.exit(1)
-                  for src, dst in [(il2cpp_c[0], "il2cpp/libil2cpp.so"),
-                                   (meta_c[0],   "il2cpp/global-metadata.dat")]:
+                  print("Format: FULL APK — scanning for IL2CPP files…")
+                  il2cpp_candidates = [n for n in names if "libil2cpp.so" in n]
+                  il2cpp_candidates.sort(key=lambda x: (0 if "arm64" in x else 1))
+                  meta_candidates   = [n for n in names if "global-metadata.dat" in n]
+
+                  if not il2cpp_candidates:
+                      print("ERROR: libil2cpp.so not found — not a Unity IL2CPP game")
+                      sys.exit(1)
+                  if not meta_candidates:
+                      print("ERROR: global-metadata.dat not found — IL2CPP metadata missing")
+                      sys.exit(1)
+
+                  for src, dst in [(il2cpp_candidates[0], "il2cpp/libil2cpp.so"),
+                                   (meta_candidates[0],   "il2cpp/global-metadata.dat")]:
                       data = z.read(src)
                       with open(dst, "wb") as f: f.write(data)
                       print(f"  {src} -> {dst}  ({len(data)//1024} KB)")
-          for fn in os.listdir("il2cpp"):
-              print(f"  il2cpp/{fn}  {os.path.getsize('il2cpp/'+fn)//1024} KB")
-          EOF
 
-      - name: Detect metadata version
-        id: meta
-        run: |
-          python3 - <<'EOF'
-          import struct
-          with open("il2cpp/global-metadata.dat", "rb") as f:
-              raw = f.read(8)
-          magic   = struct.unpack("<I", raw[:4])[0]
-          version = struct.unpack("<i", raw[4:8])[0]
-          print(f"Magic: 0x{magic:08X}")
-          print(f"Metadata version: {version}")
-          with open("/tmp/meta_version.txt", "w") as f:
-              f.write(str(version))
+          print("Extraction complete")
+          for f in os.listdir("il2cpp"):
+              sz = os.path.getsize(f"il2cpp/{f}")
+              print(f"  il2cpp/{f}  {sz//1024} KB")
           EOF
-          VERSION=$(cat /tmp/meta_version.txt)
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Metadata version: $VERSION"
 
       - name: Install .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
+      # ── Il2CppDumper cache ────────────────────────────────────────────────
+      # Check the latest release tag ONCE and use it as the cache key.
+      # Cache hit  → skip the 28 MB download entirely (saves ~15 s per run).
+      # Cache miss → download, extract, chmod, then cache for next run.
+      # The cache is invalidated automatically when a new release is tagged.
       - name: Get Il2CppDumper version
         id: il2cpp_ver
         run: |
           TAG=$(curl -s https://api.github.com/repos/AndnixSH/Il2CppDumper/releases/latest \
             | python3 -c "import sys,json; print(json.load(sys.stdin).get('tag_name',''))" 2>/dev/null || true)
-          [ -z "$TAG" ] && TAG="v6.7.46"
+          if [ -z "$TAG" ]; then
+            TAG=$(curl -s "https://api.github.com/repos/AndnixSH/Il2CppDumper/releases?per_page=5" \
+              | python3 -c "import sys,json; r=[x for x in json.load(sys.stdin) if x.get('tag_name')]; print(r[0]['tag_name'] if r else '')" 2>/dev/null || true)
+          fi
+          if [ -z "$TAG" ]; then
+            TAG="v6.1.0"
+            echo "WARNING: Using fallback tag $TAG"
+          fi
           echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "Il2CppDumper latest: $TAG"
 
       - name: Restore Il2CppDumper cache
         id: cache_dumper
@@ -103,291 +114,246 @@ jobs:
         run: |
           LATEST=$(curl -s https://api.github.com/repos/AndnixSH/Il2CppDumper/releases/latest \
             | python3 -c "import sys,json; assets=[a['browser_download_url'] for a in json.load(sys.stdin)['assets'] if 'linux-x64' in a['name']]; print(assets[0])")
+          echo "Downloading: $LATEST"
           curl -L "$LATEST" -o Il2CppDumper.zip
           unzip -q Il2CppDumper.zip -d Il2CppDumper
           chmod +x Il2CppDumper/Il2CppDumper 2>/dev/null || chmod +x Il2CppDumper/* 2>/dev/null || true
+          echo "=== Cached files ==="
+          ls -la Il2CppDumper/
 
       - name: Ensure Il2CppDumper is executable
-        run: chmod +x Il2CppDumper/Il2CppDumper 2>/dev/null || chmod +x Il2CppDumper/* 2>/dev/null || true
+        run: |
+          chmod +x Il2CppDumper/Il2CppDumper 2>/dev/null || chmod +x Il2CppDumper/* 2>/dev/null || true
+          echo "=== Il2CppDumper files ==="
+          ls -la Il2CppDumper/
 
       - name: Run Il2CppDumper
-        id: run_dumper
         run: |
           mkdir -p dump_out
           EXE=$(find Il2CppDumper -maxdepth 1 -type f -name "Il2CppDumper" | head -1)
-          [ -z "$EXE" ] && EXE=$(find Il2CppDumper -maxdepth 1 -type f ! -name "*.dll" ! -name "*.so" ! -name "*.json" | head -1)
-          "$EXE" il2cpp/libil2cpp.so il2cpp/global-metadata.dat dump_out/ 2>/dev/null | tee dumper_output.txt || true
-          if grep -qE "not a supported version" dumper_output.txt; then
-            echo "needs_patch=true"  >> $GITHUB_OUTPUT
-          else
-            echo "needs_patch=false" >> $GITHUB_OUTPUT
+          if [ -z "$EXE" ]; then
+            EXE=$(find Il2CppDumper -maxdepth 1 -type f ! -name "*.dll" ! -name "*.so" ! -name "*.json" | head -1)
           fi
+          echo "Running: $EXE"
+          "$EXE" il2cpp/libil2cpp.so il2cpp/global-metadata.dat dump_out/ 2>&1 | tee dumper_output.txt || true
+          echo "=== dump_out contents ==="
           ls -la dump_out/ 2>/dev/null || echo "(empty)"
 
-      - name: Preparing analysis engine
-        id: cache_cpp2il
-        if: steps.run_dumper.outputs.needs_patch == 'true'
-        uses: actions/cache@v4
-        with:
-          path: Cpp2IL-bin
-          key: cpp2il-2022.1.0-pre21-linux-v1
-
-      - name: Fetching analysis engine
-        if: steps.run_dumper.outputs.needs_patch == 'true' && steps.cache_cpp2il.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p Cpp2IL-bin
-          curl -sL \
-            "https://github.com/SamboyCoding/Cpp2IL/releases/download/2022.1.0-pre-release.21/Cpp2IL-2022.1.0-pre-release.21-Linux" \
-            -o Cpp2IL-bin/Cpp2IL
-          chmod +x Cpp2IL-bin/Cpp2IL
-
-      - name: Analysing symbols
-        if: steps.run_dumper.outputs.needs_patch == 'true'
-        run: |
-          chmod +x Cpp2IL-bin/Cpp2IL
-          mkdir -p cpp2il_out gpath/GameData_Data/Managed
-          timeout 600 Cpp2IL-bin/Cpp2IL \
-            --game-path gpath \
-            --exe-name GameData \
-            --force-binary-path "$(pwd)/il2cpp/libil2cpp.so" \
-            --force-metadata-path "$(pwd)/il2cpp/global-metadata.dat" \
-            --force-unity-version 2022.3.0 \
-            --output-to cpp2il_out \
-            --use-processor attributeanalyzer,attributeinjector \
-            --output-as dummydll \
-            2>/dev/null | tee cpp2il_log.txt || true
-
-      - name: Mapping symbol addresses
-        if: steps.run_dumper.outputs.needs_patch == 'true'
-        run: |
-          DLLS=$(find cpp2il_out -name "*.dll" 2>/dev/null | wc -l)
-          mkdir -p dump_out
-
-          if [ "$DLLS" -gt 0 ]; then
-              mkdir -p /tmp/extractor
-            cat > /tmp/extractor/extractor.csproj << 'PROJ'
-          <Project Sdk="Microsoft.NET.Sdk">
-            <PropertyGroup>
-              <OutputType>Exe</OutputType>
-              <TargetFramework>net8.0</TargetFramework>
-              <Nullable>enable</Nullable>
-              <ImplicitUsings>enable</ImplicitUsings>
-            </PropertyGroup>
-            <ItemGroup>
-              <PackageReference Include="System.Reflection.MetadataLoadContext" Version="8.0.0" />
-            </ItemGroup>
-          </Project>
-          PROJ
-            cat > /tmp/extractor/Program.cs << 'CSHARP'
-          using System.Reflection;
-          using System.Text.Json;
-          using System.Text.Json.Serialization;
-
-          var dllDir = args[0];
-          var outFile = args[1];
-          var results = new List<MethodEntry>();
-          var dllPaths = Directory.GetFiles(dllDir, "*.dll", SearchOption.AllDirectories);
-          var runtimeDlls = Directory.GetFiles(Path.GetDirectoryName(typeof(object).Assembly.Location)!, "*.dll");
-          var dllNames = new HashSet<string>(dllPaths.Select(Path.GetFileName)!, StringComparer.OrdinalIgnoreCase);
-          var runtimeFiltered = runtimeDlls.Where(r => !dllNames.Contains(Path.GetFileName(r)!)).ToArray();
-
-          foreach (var dll in dllPaths)
-          {
-              try {
-                  var resolver = new PathAssemblyResolver(dllPaths.Concat(runtimeFiltered));
-                  using var mlc = new MetadataLoadContext(resolver);
-                  var asm = mlc.LoadFromAssemblyPath(dll);
-                  foreach (var type in asm.GetTypes())
-                  {
-                      var typeName = type.FullName ?? type.Name;
-                      foreach (var method in type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic |
-                                                              BindingFlags.Instance | BindingFlags.Static |
-                                                              BindingFlags.DeclaredOnly))
-                      {
-                          foreach (var attr in method.CustomAttributes)
-                          {
-                              if (attr.AttributeType.Name != "AddressAttribute") continue;
-                              var rva    = attr.NamedArguments.FirstOrDefault(n => n.MemberName == "RVA").TypedValue.Value?.ToString() ?? "";
-                              var offset = attr.NamedArguments.FirstOrDefault(n => n.MemberName == "Offset").TypedValue.Value?.ToString() ?? "";
-                              if (string.IsNullOrEmpty(rva)) continue;
-                              long addr = 0;
-                              try { addr = Convert.ToInt64(rva, 16); } catch { }
-                              results.Add(new MethodEntry {
-                                  Name   = $"{typeName}::{method.Name}",
-                                  Address = addr,
-                                  Rva    = rva,
-                                  Offset = offset,
-                                  Class  = typeName,
-                                  Method = method.Name,
-                              });
-                          }
-                      }
-                  }
-              } catch (Exception ex) {
-                  Console.Error.WriteLine($"Skip {Path.GetFileName(dll)}: {ex.Message}");
-              }
-          }
-
-          Directory.CreateDirectory(Path.GetDirectoryName(outFile)!);
-          File.WriteAllText(outFile, JsonSerializer.Serialize(results,
-              new JsonSerializerOptions { WriteIndented = true }));
-          Console.WriteLine($"Extracted {results.Count} methods with addresses.");
-
-          record MethodEntry {
-              [JsonPropertyName("Name")]    public string Name    { get; init; } = "";
-              [JsonPropertyName("Address")] public long   Address { get; init; }
-              [JsonPropertyName("rva")]     public string Rva     { get; init; } = "";
-              [JsonPropertyName("offset")]  public string Offset  { get; init; } = "";
-              [JsonPropertyName("class")]   public string Class   { get; init; } = "";
-              [JsonPropertyName("method")]  public string Method  { get; init; } = "";
-          }
-          CSHARP
-
-            dotnet run --project /tmp/extractor --configuration Release -- \
-              "$(pwd)/cpp2il_out" "$(pwd)/dump_out/script.json" 2>/dev/null || true
-            METHODS=$(python3 -c "import json; print(len(json.load(open('dump_out/script.json'))))" 2>/dev/null || echo "0")
-          else
-            echo "Symbol extraction incomplete — continuing..."
-          fi
-
-          # Generate dump.cs from script.json (handles both Il2CppDumper and Cpp2IL formats)
-          python3 - << 'EOF'
-          import json, os
-          sj = "dump_out/script.json"
-          if not os.path.exists(sj):
-              print("No script.json — nothing to generate dump.cs from"); exit(0)
-          data = json.load(open(sj))
-          if not data:
-              print("Empty script.json"); exit(0)
-          by_class = {}
-          for e in data:
-              cls = e.get("class") or e.get("Class") or "Unknown"
-              by_class.setdefault(cls, []).append(e)
-          lines = ["// IL2CPP Symbol Dump\n"]
-          for cls in sorted(by_class):
-              short = cls.split(".")[-1]
-              lines.append(f"\n// Namespace: {'.'.join(cls.split('.')[:-1]) or 'global'}\npublic class {short}  // {cls}\n{{\n")
-              for m in by_class[cls]:
-                  rva    = m.get("rva") or m.get("Rva") or "0x0"
-                  offset = m.get("offset") or m.get("Offset") or "0x0"
-                  method = m.get("method") or m.get("Method") or "???"
-                  lines.append(f"    // RVA: {rva} Offset: {offset}\n    public void {method}();\n")
-              lines.append("}\n")
-          with open("dump_out/dump.cs", "w") as f: f.writelines(lines)
-          print(f"Generated dump.cs: {len(data)} methods across {len(by_class)} classes")
-          EOF
-
+      # ── Recover any missing script files from script.json ────────────────────
+      # Il2CppDumper sometimes throws an exception after writing dump.cs /
+      # script.json / stringliteral.json but before it writes ida.py,
+      # ida_with_struct.py, ghidra.py, and il2cpp.h.
+      # When script.json is present we regenerate those files ourselves so the
+      # user always gets every available output.
       - name: Recover missing script files from script.json
         run: |
-          python3 - <<'EOF'
+          python3 - <<'PYEOF'
           import json, os
+
           sj = "dump_out/script.json"
           if not os.path.exists(sj):
-              print("script.json not found"); exit(0)
+              print("script.json not found — nothing to recover")
+              exit(0)
+
           with open(sj, encoding="utf-8") as f:
               raw = json.load(f)
-          entries = [e for e in (raw if isinstance(raw, list) else []) if isinstance(e, dict)]
-          print(f"script.json: {len(entries)} entries")
-          def _get(e): return e.get("Address") or e.get("address",0), e.get("Name") or e.get("name","")
-          def _hdr(p):
-              if os.path.exists(p):
-                  with open(p, encoding="utf-8") as f: return f.read().strip()+"\n\n"
-              return "import idc\ndef SetScriptAddressComments(d):\n    for ea,n in d.items(): idc.set_name(ea,n,idc.SN_CHECK)\n\n"
-          for fname, hdr_path, var, footer in [
-              ("ida.py",            "Il2CppDumper/ida.py",            "method_dict", "SetScriptAddressComments(method_dict)\n"),
-              ("ida_with_struct.py","Il2CppDumper/ida_with_struct.py","method_dict", "SetScriptAddressComments(method_dict)\n"),
-          ]:
-              if os.path.exists(f"dump_out/{fname}"): print(f"{fname} exists"); continue
-              hdr = _hdr(hdr_path)
-              lines = [hdr, f"{var} = {{\n"]
-              for e in entries:
-                  addr, name = _get(e)
-                  if addr and name:
-                      lines.append(f"    {addr}: '{name.replace(chr(39), chr(92)+chr(39))}',\n")
-              lines.append(f"}}\n{footer}")
-              with open(f"dump_out/{fname}", "w", encoding="utf-8") as f: f.writelines(lines)
-              print(f"Generated {fname}")
-          if not os.path.exists("dump_out/ghidra.py"):
-              lines = ["# Ghidra\ndef run(): pass\n\n", "METHOD_DICT = {\n"]
-              for e in entries:
-                  addr, name = _get(e)
-                  if addr and name:
-                      lines.append(f"    {addr}: '{name.replace(chr(39), chr(92)+chr(39))}',\n")
-              lines.append("}\nrun()\n")
-              with open("dump_out/ghidra.py","w",encoding="utf-8") as f: f.writelines(lines)
-              print("Generated ghidra.py")
-          EOF
 
-      - name: Parse dump to offsets.json
+          # Normalise: handle both dict entries {"Address":…,"Name":…}
+          # and any non-dict format — skip non-dicts gracefully.
+          entries = [e for e in (raw if isinstance(raw, list) else []) if isinstance(e, dict)]
+          print(f"script.json loaded: {len(raw)} raw / {len(entries)} usable dict entries")
+
+          def _get_addr_name(e):
+              addr = e.get("Address") or e.get("address") or 0
+              name = e.get("Name")    or e.get("name")    or ""
+              return addr, name
+
+          def _ida_header(tmpl_path):
+              if os.path.exists(tmpl_path):
+                  with open(tmpl_path, encoding="utf-8") as f:
+                      return f.read().strip() + "\n\n"
+              return (
+                  "import idc\n\n"
+                  "def SetScriptAddressComments(d):\n"
+                  "    for ea, n in d.items():\n"
+                  "        idc.set_name(ea, n, idc.SN_CHECK)\n\n"
+              )
+
+          # ── ida.py ────────────────────────────────────────────────────────────
+          if not os.path.exists("dump_out/ida.py"):
+              hdr   = _ida_header("Il2CppDumper/ida.py")
+              lines = [hdr, "method_dict = {\n"]
+              for e in entries:
+                  addr, name = _get_addr_name(e)
+                  if addr and name:
+                      safe = name.replace("\\", "\\\\").replace("'", "\\'")
+                      lines.append(f"    {addr}: '{safe}',\n")
+              lines.append("}\nSetScriptAddressComments(method_dict)\n")
+              with open("dump_out/ida.py", "w", encoding="utf-8") as f:
+                  f.writelines(lines)
+              print(f"Generated dump_out/ida.py  ({len(entries)} entries)")
+          else:
+              print("dump_out/ida.py already exists — skipping")
+
+          # ── ida_with_struct.py ────────────────────────────────────────────────
+          if not os.path.exists("dump_out/ida_with_struct.py"):
+              hdr   = _ida_header("Il2CppDumper/ida_with_struct.py")
+              lines = [hdr, "method_dict = {\n"]
+              for e in entries:
+                  addr, name = _get_addr_name(e)
+                  if addr and name:
+                      safe = name.replace("\\", "\\\\").replace("'", "\\'")
+                      lines.append(f"    {addr}: '{safe}',\n")
+              lines.append("}\nSetScriptAddressComments(method_dict)\n")
+              with open("dump_out/ida_with_struct.py", "w", encoding="utf-8") as f:
+                  f.writelines(lines)
+              print(f"Generated dump_out/ida_with_struct.py  ({len(entries)} entries)")
+          else:
+              print("dump_out/ida_with_struct.py already exists — skipping")
+
+          # ── ghidra.py ─────────────────────────────────────────────────────────
+          if not os.path.exists("dump_out/ghidra.py"):
+              if os.path.exists("Il2CppDumper/ghidra.py"):
+                  with open("Il2CppDumper/ghidra.py", encoding="utf-8") as f:
+                      hdr = f.read().strip() + "\n\n"
+              else:
+                  hdr = (
+                      "# Ghidra script — auto-generated by Taurus Shield\n"
+                      "from ghidra.app.script import GhidraScript\n\n"
+                      "def run():\n"
+                      "    for addr, name in METHOD_DICT.items():\n"
+                      "        sym = currentProgram.getSymbolTable()\\\n"
+                      "            .createLabel(toAddr(addr), name, ghidra.program.model.symbol.SourceType.USER_DEFINED)\n\n"
+                  )
+              lines = [hdr, "METHOD_DICT = {\n"]
+              for e in entries:
+                  addr, name = _get_addr_name(e)
+                  if addr and name:
+                      safe = name.replace("\\", "\\\\").replace("'", "\\'")
+                      lines.append(f"    {addr}: '{safe}',\n")
+              lines.append("}\nrun()\n")
+              with open("dump_out/ghidra.py", "w", encoding="utf-8") as f:
+                  f.writelines(lines)
+              print(f"Generated dump_out/ghidra.py  ({len(entries)} entries)")
+          else:
+              print("dump_out/ghidra.py already exists — skipping")
+
+          print("=== dump_out after recovery ===")
+          for fn in sorted(os.listdir("dump_out")):
+              sz = os.path.getsize(f"dump_out/{fn}")
+              print(f"  {fn}  {sz//1024} KB")
+          PYEOF
+
+      - name: Parse dump → offsets.json
         run: |
           python3 - <<'EOF'
           import re, json, os, sys
+
+          if os.path.exists("dumper_output.txt"):
+              with open("dumper_output.txt") as f:
+                  out = f.read().strip()
+              print("=== Il2CppDumper output ===")
+              print(out[-3000:] if len(out) > 3000 else out)
+              print("===========================")
+
           dump_file = "dump_out/dump.cs"
           if not os.path.exists(dump_file):
               sj = "dump_out/script.json"
               if os.path.exists(sj):
-                  data = json.load(open(sj)); print(f"Fallback: script.json {len(data)} entries")
-                  json.dump(data, open("offsets.json","w"), indent=2); sys.exit(0)
+                  with open(sj) as f: data = json.load(f)
+                  print(f"Using script.json: {len(data)} entries")
+                  with open("offsets.json", "w") as f: json.dump(data, f, indent=2)
+                  sys.exit(0)
+
               out_files = os.listdir("dump_out") if os.path.isdir("dump_out") else []
-              log = open("dumper_output.txt").read() if os.path.exists("dumper_output.txt") else "no log"
-              cpp2il_log = open("cpp2il_log.txt").read() if os.path.exists("cpp2il_log.txt") else ""
-              json.dump({"error":"No dump produced","dump_out_files":out_files,
-                         "engine_log":log[-2000:],"engine_log2":cpp2il_log[-2000:],
-                         "total_methods":0,"interesting_methods":[],"all_methods":[]},
-                        open("offsets.json","w"), indent=2)
-              print("Wrote error offsets.json"); sys.exit(0)
-          methods, current_class, pending = [], "", None
+              print(f"dump_out contains: {out_files}")
+              dumper_log = open("dumper_output.txt").read() if os.path.exists("dumper_output.txt") else "no log"
+              error_json = {
+                  "error": "Il2CppDumper produced no output",
+                  "dump_out_files": out_files,
+                  "dumper_log": dumper_log[-2000:],
+                  "total_methods": 0, "interesting_methods": [], "all_methods": []
+              }
+              with open("offsets.json", "w") as f: json.dump(error_json, f, indent=2)
+              print("Wrote error offsets.json — workflow will continue and upload diagnostic JSON")
+              sys.exit(0)
+
+          methods = []
+          current_class = ""
+          pending = None
+
           with open(dump_file, encoding="utf-8", errors="replace") as f:
               for line in f:
-                  cm = re.match(r'^\s*(?:public |private |protected |internal |sealed |abstract )*(?:class|struct|interface)\s+(\w+)', line)
-                  if cm: current_class = cm.group(1)
-                  mm = re.search(r'//\s*RVA:\s*(0x[0-9A-Fa-f]+)\s+Offset:\s*(0x[0-9A-Fa-f]+)', line)
-                  if mm: pending = {"rva":mm.group(1),"offset":mm.group(2),"class":current_class}; continue
+                  cm = re.match(
+                      r'^\s*(?:public |private |protected |internal |sealed |abstract )*'
+                      r'(?:class|struct|interface)\s+(\w+)', line)
+                  if cm:
+                      current_class = cm.group(1)
+
+                  mm = re.search(
+                      r'//\s*RVA:\s*(0x[0-9A-Fa-f]+)\s+Offset:\s*(0x[0-9A-Fa-f]+)', line)
+                  if mm:
+                      pending = {"rva": mm.group(1), "offset": mm.group(2), "class": current_class}
+                      continue
+
                   if pending is not None:
-                      sig = re.search(r'(\w[\w\s\*<>\[\],.]+)\s+(\w+)\s*\(([^)]*)\)', line)
+                      sig = re.search(
+                          r'(\w[\w\s\*<>\[\],.]+)\s+(\w+)\s*\(([^)]*)\)', line)
                       if sig and not line.strip().startswith("//"):
-                          pending.update({"method":sig.group(2).strip(),"return_type":sig.group(1).strip(),
-                                          "params":sig.group(3).strip(),"signature":line.strip()})
+                          pending.update({
+                              "method": sig.group(2).strip(),
+                              "return_type": sig.group(1).strip(),
+                              "params": sig.group(3).strip(),
+                              "signature": line.strip()
+                          })
                           methods.append(pending)
                       pending = None
-          kw = {"coin":9,"gold":9,"gem":9,"diamond":9,"money":8,"cash":8,"unlock":8,"premium":8,"vip":7,
-                "infinite":10,"unlimited":10,"invincib":10,"revive":8,"cheat":10,"hack":10,
-                "speed":7,"damage":6,"health":6,"hp":6,"score":7,"reward":7,"chest":7,"cooldown":7}
+
+          keywords = {
+              "coin":9,"gold":9,"gem":9,"diamond":9,"money":8,"cash":8,
+              "unlock":8,"premium":8,"vip":7,"affor":9,
+              "enough":7,"cost":6,"speed":7,"damage":6,"health":6,"hp":6,
+              "score":7,"point":6,"reward":7,"chest":7,"pickup":6,
+              "cooldown":7,"infinite":10,"unlimited":10,"invincib":10,"revive":8,
+              "cheat":10,"hack":10,"spawn":6,"max":5,
+              "save":4,"load":4,"add":2,"set":2,"get":1
+          }
           for m in methods:
-              t = (m.get("method","")+" "+m.get("class","")).lower()
-              m["interest_score"] = sum(p for k,p in kw.items() if k in t)
+              text = (m.get("method","") + " " + m.get("class","")).lower()
+              m["interest_score"] = sum(pts for kw, pts in keywords.items() if kw in text)
+
           methods.sort(key=lambda x: -x["interest_score"])
-          top = [m for m in methods if m["interest_score"]>0][:500]
-          game_cls = [m for m in methods if any(k in m.get("class","").lower()
-                      for k in ["game","runner","player","character","coin","score","enemy","level","spawn"])]
-          json.dump({"total_methods":len(methods),"interesting_methods":top,
-                     "game_class_methods":game_cls,"all_methods":methods},
-                    open("offsets.json","w"), indent=2)
+          top = [m for m in methods if m["interest_score"] > 0][:500]
+
+          game_classes = [m for m in methods if any(
+              k in m.get("class","").lower()
+              for k in ["game","runner","player","character","coin","score","enemy","level","spawn"]
+          )]
+
+          result = {
+              "total_methods": len(methods),
+              "interesting_methods": top,
+              "game_class_methods": game_classes,
+              "all_methods": methods
+          }
+          with open("offsets.json","w") as f: json.dump(result, f, indent=2)
           print(f"offsets.json: {len(top)} interesting / {len(methods)} total methods")
           EOF
 
-      - name: Flatten output files for artifact
+      - name: Prepare artifact directory
         run: |
-          for f in dump.cs script.json il2cpp.h stringliteral.json ida.py ida_with_struct.py ghidra.py; do
-            [ -f "dump_out/$f" ] && cp "dump_out/$f" "$f" && echo "Copied $f" || echo "Not found: $f (skipped)"
-          done
+          cp offsets.json dump_out/offsets.json
+          echo "=== Artifact contents ==="
+          ls -la dump_out/
 
       - name: Upload results artifact
         uses: actions/upload-artifact@v4
         with:
           name: game-dump-${{ inputs.job_id }}
           path: |
-            offsets.json
-            dump.cs
-            script.json
-            il2cpp.h
-            stringliteral.json
-            ida.py
-            ida_with_struct.py
-            ghidra.py
-            cpp2il_log.txt
+            dump_out/**
+            !dump_out/DummyDlls/**
           retention-days: 7
-
       - name: Delete input asset
         run: |
           curl -s -L -X DELETE \
@@ -397,12 +363,9 @@ jobs:
 
       - name: Summary
         run: |
-          META="${{ steps.meta.outputs.version }}"
-          PATCH="${{ steps.run_dumper.outputs.needs_patch }}"
-          TOOL="Taurus Engine (metadata v${META})"
-          echo "## Game Dump Complete" >> $GITHUB_STEP_SUMMARY
+          echo "## Game Dump Complete ✅" >> $GITHUB_STEP_SUMMARY
           echo "- **Job ID:** ${{ inputs.job_id }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Tool:** $TOOL" >> $GITHUB_STEP_SUMMARY
+          echo "- **Il2CppDumper:** ${{ steps.il2cpp_ver.outputs.tag }} (cache hit: ${{ steps.cache_dumper.outputs.cache-hit }})" >> $GITHUB_STEP_SUMMARY
           echo "- **Artifact:** game-dump-${{ inputs.job_id }} (7-day retention)" >> $GITHUB_STEP_SUMMARY
-          [ -f offsets.json ] && echo "- **offsets.json:** $(du -sh offsets.json | cut -f1)" >> $GITHUB_STEP_SUMMARY || true
-          echo "- **Files:** $(ls dump.cs script.json il2cpp.h stringliteral.json ida.py ida_with_struct.py ghidra.py 2>/dev/null | tr '\n' ' ' || echo empty)" >> $GITHUB_STEP_SUMMARY
+          [ -f offsets.json ] && echo "- **offsets.json size:** $(du -sh offsets.json | cut -f1)" >> $GITHUB_STEP_SUMMARY || true
+          echo "- **dump_out files:** $(ls dump_out/ 2>/dev/null | tr '\n' ' ' || echo empty)" >> $GITHUB_STEP_SUMMARY

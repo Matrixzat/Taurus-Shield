@@ -9,19 +9,20 @@ on:
       job_id:
         description: 'Unique job ID for artifact naming'
         required: true
-      no_analysis:
-        description: 'Skip code analysis (faster, avoids crashes on some snapshots)'
-        required: false
-        default: 'false'
 
 jobs:
   analyze:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: write
 
     steps:
+      - name: Checkout Taurus integration
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
       - name: Download uploaded ZIP
         run: |
           curl -fL \
@@ -57,10 +58,15 @@ jobs:
           LIB_DIR=$(cd "$(dirname "$SO_PATH")" && pwd)
           echo "LIB_DIR=$LIB_DIR" >> $GITHUB_ENV
 
+      # ── Only install what is NOT pre-installed on ubuntu-latest ──────────────
+      # cmake, ninja-build, clang, build-essential, git, python3-pip are all
+      # available by default — no need to install them.
       - name: Install missing system libraries
         run: |
+          sudo apt-get update -qq
           sudo apt-get install -y --no-install-recommends libicu-dev libcapstone-dev
 
+      # ── Cache pip packages ────────────────────────────────────────────────────
       - name: Cache pip packages
         uses: actions/cache@v4
         with:
@@ -70,46 +76,53 @@ jobs:
       - name: Install Python packages
         run: pip3 install pyelftools requests --quiet
 
-      - name: Get blutter HEAD SHA
+      - name: Resolve latest upstream Blutter commit
         id: blutter-sha
         run: |
           set -euo pipefail
           SHA=$(git ls-remote https://github.com/worawit/blutter.git HEAD | cut -f1)
-          test "${#SHA}" -eq 40
-          echo "sha=$SHA" >> $GITHUB_OUTPUT
-          echo "Blutter SHA: ${SHA:0:12}"
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "Cannot resolve upstream HEAD"; exit 1; }
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Blutter commit: $SHA"
 
-      - name: Restore blutter cache
-        id: blutter-cache
-        uses: actions/cache@v4
+      - name: Checkout exact upstream Blutter
+        uses: actions/checkout@v4
         with:
+          repository: worawit/blutter
+          ref: ${{ steps.blutter-sha.outputs.sha }}
           path: blutter
-          key: blutter-${{ steps.blutter-sha.outputs.sha }}
+          persist-credentials: false
 
-      - name: Clone blutter (cache miss only)
-        if: steps.blutter-cache.outputs.cache-hit != 'true'
-        run: git clone --depth=1 https://github.com/worawit/blutter.git
+      - name: Detect target Dart and record engine provenance
+        id: target
+        run: python3 scripts/blutter_target.py --lib-dir "$LIB_DIR" --output blutter_output/engine-version.json
+
+      - name: Restore compiled target cache
+        id: blutter-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            blutter/bin
+            blutter/packages
+          key: blutter-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.target.outputs.cache_key }}
 
       - name: Run blutter analysis
         run: |
           mkdir -p blutter_output
           echo "Analyzing: $LIB_DIR"
-          NO_ANALYSIS_FLAG=""
-          if [ "${{ inputs.no_analysis }}" = "true" ]; then
-            NO_ANALYSIS_FLAG="--no-analysis"
-            echo "Running with --no-analysis flag"
-          fi
           cd blutter
-          python3 blutter.py $NO_ANALYSIS_FLAG "$LIB_DIR" "$GITHUB_WORKSPACE/blutter_output" 2>&1 | tee "$GITHUB_WORKSPACE/blutter_run.log"
+          python3 blutter.py "$LIB_DIR" "$GITHUB_WORKSPACE/blutter_output" 2>&1 | tee "$GITHUB_WORKSPACE/blutter_run.log"
           exit ${PIPESTATUS[0]}
         timeout-minutes: 35
 
-      - name: Save blutter cache
+      - name: Save compiled target cache
         if: steps.blutter-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          path: blutter
-          key: blutter-${{ steps.blutter-sha.outputs.sha }}
+          path: |
+            blutter/bin
+            blutter/packages
+          key: blutter-v2-${{ runner.os }}-${{ runner.arch }}-${{ steps.target.outputs.cache_key }}
 
       - name: Show output summary
         run: |
@@ -133,4 +146,3 @@ jobs:
           name: error-${{ inputs.job_id }}
           path: blutter_run.log
           retention-days: 1
-

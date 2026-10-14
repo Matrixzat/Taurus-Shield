@@ -1,0 +1,77 @@
+name: Refresh upstream engines
+
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: refresh-upstream-engines
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      actions: write
+    env:
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Refresh and validate bundled Hermes engine
+        run: python3 Taurus-Shield/android/sync_hbctool.py
+
+      - name: Check upstream integration regressions
+        run: python3 scripts/test_upstream_integration.py
+
+      - name: Record latest Blutter revision
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, re, subprocess, sys
+          sys.path.insert(0, 'scripts')
+          from blutter_versions import resolve_versions
+          repo = 'https://github.com/worawit/blutter.git'
+          sha = subprocess.check_output(['git', 'ls-remote', repo, 'HEAD'], text=True, timeout=120).split()[0]
+          assert re.fullmatch(r'[0-9a-f]{40}', sha), 'Cannot resolve upstream Blutter'
+          pathlib.Path('upstream').mkdir(exist_ok=True)
+          pathlib.Path('upstream/blutter.json').write_text(json.dumps({'repository': repo, 'commit': sha, 'stable_dart_versions': resolve_versions()}, indent=2) + '\n')
+          PY
+
+      - name: Record newest stable DPT Shell release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p upstream
+          python3 scripts/dpt_release.py resolve --metadata upstream/dpt-shell.json
+
+      - name: Commit validated engine updates
+        id: changes
+        run: |
+          set -euo pipefail
+          git add Taurus-Shield/android/app/src/main/python/hbctool Taurus-Shield/lib/generated/hbc_build_info.dart upstream/blutter.json upstream/dpt-shell.json
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Refresh HBC, Blutter and DPT upstream versions'
+          git push origin "HEAD:$DEFAULT_BRANCH"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build updated APK artifact
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run build-apk.yml --ref "$DEFAULT_BRANCH" -f job_id="upstream-${GITHUB_RUN_ID}" -f upload_to_release=false
+
+      - name: Rebuild optional Blutter Android binary
+        if: steps.changes.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run build.yml --ref "$DEFAULT_BRANCH" -f dart_versions=auto
