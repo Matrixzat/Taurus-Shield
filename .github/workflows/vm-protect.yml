@@ -111,21 +111,24 @@ jobs:
           ABIS=$(unzip -Z1 "$APK_ABS" 2>/dev/null \
             | sed -nE 's#^lib/([^/]+)/[^/]+\.so$#\1#p' \
             | sort -u)
+          SUPPORTED_ABIS=$'armeabi-v7a\narm64-v8a\nx86\nx86_64'
           if [ -z "$ABIS" ]; then
-            echo "No native libraries found; NMMP will use the dual-ABI config."
+            echo "No native libraries found; NMMP will use both ARM ABIs."
+            APK_ABIS="armeabi-v7a,arm64-v8a"
           else
             printf '%s\n' "$ABIS"
-            if ! printf '%s\n' "$ABIS" | grep -qx "arm64-v8a"; then
-              echo "ERROR: input APK has no arm64-v8a native library slice."
-              echo "NMMP cannot turn a 32-bit-only native APK into ARM64."
-              exit 1
-            fi
-            if ! printf '%s\n' "$ABIS" | grep -qx "armeabi-v7a"; then
-              echo "ERROR: input APK has no armeabi-v7a native library slice."
-              echo "NMMP preserves the input APK ABI set; provide both ARM slices."
-              exit 1
-            fi
+            while IFS= read -r ABI; do
+              [ -z "$ABI" ] && continue
+              if ! printf '%s\n' "$SUPPORTED_ABIS" | grep -qx "$ABI"; then
+                echo "ERROR: input APK contains unsupported ABI: $ABI"
+                echo "Supported NMMP ABIs: armeabi-v7a, arm64-v8a, x86, x86_64"
+                exit 1
+              fi
+            done <<< "$ABIS"
+            APK_ABIS=$(printf '%s\n' "$ABIS" | paste -sd, -)
           fi
+          echo "NMMP will process input ABI set: $APK_ABIS"
+          echo "APK_ABIS=$APK_ABIS" >> "$GITHUB_ENV"
 
       - name: Log protection mode
         if: env.RULES_PATH == ''
@@ -219,19 +222,18 @@ jobs:
             -O vm-protect.jar
           ls -lh vm-protect.jar
 
-      - name: Configure NMMP for Android ARM64
+      - name: Configure NMMP for input APK ABIs
         run: |
           JAR_DIR="$(dirname "$GITHUB_WORKSPACE/vm-protect.jar")"
           mkdir -p "$JAR_DIR/tools"
 
-          # NMMP reads this file beside vm-protect.jar. Enable both Android
-          # ARM ABIs so the generated runtime can support 32-bit and 64-bit
-          # devices when the input APK contains both native slices.
+          # NMMP reads this file beside vm-protect.jar. Enable exactly the ABIs
+          # found in the uploaded APK so single- and multi-ABI APKs are retained.
           cat > "$JAR_DIR/tools/config.json" <<EOF
           {
             "abi": {
-              "armeabi-v7a": true,
-              "arm64-v8a": true,
+              "armeabi-v7a": false,
+              "arm64-v8a": false,
               "x86": false,
               "x86_64": false
             },
@@ -246,21 +248,20 @@ jobs:
           }
           EOF
 
-          python3 - "$JAR_DIR/tools/config.json" <<'PY'
+          python3 - "$JAR_DIR/tools/config.json" "$APK_ABIS" <<'PY'
           import json
           import sys
           from pathlib import Path
 
           config_path = Path(sys.argv[1])
+          selected = set(filter(None, sys.argv[2].split(",")))
+          supported = ("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+          if not selected or not selected.issubset(supported):
+              raise SystemExit(f"Invalid APK ABI set: {sorted(selected)}")
           config = json.loads(config_path.read_text())
-          abi = config["abi"]
-          assert abi == {
-              "armeabi-v7a": True,
-              "arm64-v8a": True,
-              "x86": False,
-              "x86_64": False,
-          }, abi
-          print("NMMP ABI configuration verified: armeabi-v7a + arm64-v8a")
+          config["abi"] = {abi: abi in selected for abi in supported}
+          config_path.write_text(json.dumps(config, indent=2) + "\n")
+          print("NMMP ABI configuration verified: " + " + ".join(sorted(selected)))
           PY
 
       - name: Run VM Protect
@@ -305,27 +306,21 @@ jobs:
           echo "Protected APK: $(wc -c < vmprotect_output/protected.apk) bytes"
           find vmprotect_output/ -type f | sort
 
-      - name: Verify protected APK contains both ARM ABIs
+      - name: Verify protected APK contains every input ABI runtime
         run: |
           APK="vmprotect_output/protected.apk"
           echo "=== Native libraries in protected APK ==="
           unzip -Z1 "$APK" | grep '^lib/.*\.so$' | sort || true
 
-          if ! unzip -Z1 "$APK" | grep -q '^lib/arm64-v8a/libnmmp\.so$'; then
-            echo "ERROR: protected APK is missing lib/arm64-v8a/libnmmp.so"
-            echo "NMMP did not produce the ARM64 runtime."
-            exit 1
-          fi
-
-          if ! unzip -Z1 "$APK" | grep -q '^lib/armeabi-v7a/libnmmp\.so$'; then
-            echo "ERROR: protected APK is missing lib/armeabi-v7a/libnmmp.so"
-            echo "NMMP did not produce the 32-bit ARM runtime."
-            exit 1
-          fi
-
-          echo "Both NMMP runtimes verified:"
-          echo "  lib/armeabi-v7a/libnmmp.so"
-          echo "  lib/arm64-v8a/libnmmp.so"
+          IFS=',' read -r -a REQUIRED_ABIS <<< "$APK_ABIS"
+          for ABI in "${REQUIRED_ABIS[@]}"; do
+            if ! unzip -Z1 "$APK" | grep -Fqx "lib/$ABI/libnmmp.so"; then
+              echo "ERROR: protected APK is missing lib/$ABI/libnmmp.so"
+              echo "NMMP did not produce the runtime required for input ABI $ABI."
+              exit 1
+            fi
+            echo "Verified: lib/$ABI/libnmmp.so"
+          done
 
       - name: Sign APK
         if: inputs.sign_apk == 'true'
